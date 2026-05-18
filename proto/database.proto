@@ -6,7 +6,29 @@ service DatabaseService {
 
   rpc Get (GetRequest) returns (GetResponse);
 
-  rpc Replicate (ReplicationRequest) returns (ReplicationResponse);
+  rpc Replicate (ReplicationRequest)
+      returns (ReplicationResponse);
+
+  rpc Update (UpdateRequest)
+      returns (UpdateResponse);
+
+  rpc Delete (DeleteRequest)
+      returns (DeleteResponse);
+
+  rpc ListKeys (EmptyRequest)
+      returns (ListKeysResponse);
+
+  rpc Exists (ExistsRequest)
+      returns (ExistsResponse);
+
+  rpc Size (EmptyRequest)
+      returns (SizeResponse);
+
+  rpc Clear (EmptyRequest)
+      returns (ClearResponse);
+
+  rpc GetAll (EmptyRequest)
+      returns (GetAllResponse);
 }
 
 message PutRequest {
@@ -38,4 +60,64 @@ message ReplicationRequest {
 
 message ReplicationResponse {
   string message = 1;
+}
+
+message UpdateRequest {
+  string key = 1;
+  string value = 2;
+  int32 timestamp = 3;
+}
+
+message UpdateResponse {
+  string message = 1;
+  int32 timestamp = 2;
+}
+
+message DeleteRequest {
+  string key = 1;
+  int32 timestamp = 2;
+}
+
+message DeleteResponse {
+  string message = 1;
+  int32 timestamp = 2;
+}
+
+message EmptyRequest {
+  int32 timestamp = 1;
+}
+
+message ListKeysResponse {
+  repeated string keys = 1;
+  int32 timestamp = 2;
+}
+
+message ExistsRequest {
+  string key = 1;
+  int32 timestamp = 2;
+}
+
+message ExistsResponse {
+  bool exists = 1;
+  int32 timestamp = 2;
+}
+
+message SizeResponse {
+  int32 size = 1;
+  int32 timestamp = 2;
+}
+
+message ClearResponse {
+  string message = 1;
+  int32 timestamp = 2;
+}
+
+message KeyValue {
+  string key = 1;
+  string value = 2;
+}
+
+message GetAllResponse {
+  repeated KeyValue items = 1;
+  int32 timestamp = 2;
 }
