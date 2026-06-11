@@ -1,123 +1,224 @@
 syntax = "proto3";
 
+package distdb;
+
+// ============================================================================
+//  Distributed Key-Value Database service
+//
+//  The same service is implemented by every node in the cluster. A node can
+//  act as the LEADER (coordinator of writes) or as a REPLICA (participant),
+//  and the role can change at runtime through leader election.
+//
+//  RPC groups:
+//    * Client API .......... Put / Get / Update / Delete / read helpers
+//    * Two-Phase Commit .... Prepare / Commit / Abort  (coordinator -> replica)
+//    * Coordination ........ Heartbeat / Election / Announce / WhoIsLeader
+//    * Recovery ............ SyncState (state transfer to a rejoining node)
+// ============================================================================
 service DatabaseService {
+  // ---- Client-facing API (clients talk to the leader) ----
+  rpc Put     (WriteRequest)  returns (WriteResponse);
+  rpc Update  (WriteRequest)  returns (WriteResponse);
+  rpc Delete  (DeleteRequest) returns (WriteResponse);
+  rpc Get     (GetRequest)    returns (GetResponse);
+  rpc Exists  (KeyRequest)    returns (ExistsResponse);
+  rpc ListKeys(EmptyRequest)  returns (ListKeysResponse);
+  rpc Size    (EmptyRequest)  returns (SizeResponse);
+  rpc GetAll  (EmptyRequest)  returns (GetAllResponse);
 
-  rpc Put (PutRequest) returns (PutResponse);
+  // ---- Two-Phase Commit (leader -> replicas) ----
+  rpc Prepare (PrepareRequest) returns (VoteResponse);
+  rpc Commit  (DecisionRequest) returns (AckResponse);
+  rpc Abort   (DecisionRequest) returns (AckResponse);
+  // Termination protocol: an in-doubt participant (prepared, coordinator gone)
+  // asks its peers what was decided for a transaction.
+  rpc QueryDecision (DecisionQuery) returns (DecisionInfo);
 
-  rpc Get (GetRequest) returns (GetResponse);
+  // ---- Cluster coordination ----
+  rpc Heartbeat (HeartbeatRequest) returns (HeartbeatResponse);
+  rpc Election  (ElectionRequest)  returns (ElectionResponse);
+  rpc Announce  (CoordinatorMsg)   returns (AckResponse);
+  rpc WhoIsLeader(EmptyRequest)    returns (LeaderInfo);
 
-  rpc Replicate (ReplicationRequest)
-      returns (ReplicationResponse);
-
-  rpc Update (UpdateRequest)
-      returns (UpdateResponse);
-
-  rpc Delete (DeleteRequest)
-      returns (DeleteResponse);
-
-  rpc ListKeys (EmptyRequest)
-      returns (ListKeysResponse);
-
-  rpc Exists (ExistsRequest)
-      returns (ExistsResponse);
-
-  rpc Size (EmptyRequest)
-      returns (SizeResponse);
-
-  rpc Clear (EmptyRequest)
-      returns (ClearResponse);
-
-  rpc GetAll (EmptyRequest)
-      returns (GetAllResponse);
+  // ---- Recovery / replica control ----
+  rpc SyncState (SyncRequest) returns (SyncResponse);
 }
 
-message PutRequest {
-  string key = 1;
-  string value = 2;
-  int32 timestamp = 3;
+// ----------------------------------------------------------------------------
+//  Common
+// ----------------------------------------------------------------------------
+message EmptyRequest {
+  int64 timestamp = 1;        // sender's Lamport clock
 }
 
-message PutResponse {
-  string message = 1;
-  int32 timestamp = 2;
+// Generic response that also tells the client who the current leader is, so a
+// client that contacted the wrong node can be redirected (NOT_LEADER status).
+enum Status {
+  OK         = 0;
+  NOT_LEADER = 1;   // contacted node is not the leader; see leader_address
+  KEY_ABSENT = 2;   // operation needed an existing key that was not found
+  ABORTED    = 3;   // distributed transaction aborted
+  ERROR      = 4;   // generic failure
 }
 
-message GetRequest {
-  string key = 1;
-  int32 timestamp = 2;
+// ----------------------------------------------------------------------------
+//  Client API
+// ----------------------------------------------------------------------------
+message WriteRequest {
+  string key       = 1;
+  string value     = 2;
+  int64  timestamp = 3;       // client's Lamport clock
 }
 
-message GetResponse {
-  string value = 1;
-  int32 timestamp = 2;
-}
-
-message ReplicationRequest {
-  string key = 1;
-  string value = 2;
-  int32 timestamp = 3;
-}
-
-message ReplicationResponse {
-  string message = 1;
-}
-
-message UpdateRequest {
-  string key = 1;
-  string value = 2;
-  int32 timestamp = 3;
-}
-
-message UpdateResponse {
-  string message = 1;
-  int32 timestamp = 2;
+message WriteResponse {
+  Status status         = 1;
+  string message        = 2;
+  int64  timestamp      = 3;  // leader's Lamport clock after the operation
+  string leader_address = 4;  // filled when status == NOT_LEADER
 }
 
 message DeleteRequest {
-  string key = 1;
-  int32 timestamp = 2;
+  string key       = 1;
+  int64  timestamp = 2;
 }
 
-message DeleteResponse {
-  string message = 1;
-  int32 timestamp = 2;
+message GetRequest {
+  string key       = 1;
+  int64  timestamp = 2;
 }
 
-message EmptyRequest {
-  int32 timestamp = 1;
+message GetResponse {
+  Status status    = 1;
+  bool   found     = 2;
+  string value     = 3;
+  int64  timestamp = 4;
+}
+
+message KeyRequest {
+  string key       = 1;
+  int64  timestamp = 2;
+}
+
+message ExistsResponse {
+  bool  exists    = 1;
+  int64 timestamp = 2;
 }
 
 message ListKeysResponse {
   repeated string keys = 1;
-  int32 timestamp = 2;
-}
-
-message ExistsRequest {
-  string key = 1;
-  int32 timestamp = 2;
-}
-
-message ExistsResponse {
-  bool exists = 1;
-  int32 timestamp = 2;
+  int64 timestamp      = 2;
 }
 
 message SizeResponse {
-  int32 size = 1;
-  int32 timestamp = 2;
-}
-
-message ClearResponse {
-  string message = 1;
-  int32 timestamp = 2;
+  int32 size      = 1;
+  int64 timestamp = 2;
 }
 
 message KeyValue {
-  string key = 1;
+  string key   = 1;
   string value = 2;
 }
 
 message GetAllResponse {
   repeated KeyValue items = 1;
-  int32 timestamp = 2;
+  int64 timestamp         = 2;
+}
+
+// ----------------------------------------------------------------------------
+//  Two-Phase Commit
+// ----------------------------------------------------------------------------
+enum OpType {
+  OP_PUT    = 0;
+  OP_UPDATE = 1;
+  OP_DELETE = 2;
+}
+
+message PrepareRequest {
+  string tx_id     = 1;       // unique transaction id
+  OpType op        = 2;
+  string key       = 3;
+  string value     = 4;
+  int64  timestamp = 5;       // coordinator's Lamport clock
+}
+
+message VoteResponse {
+  string tx_id     = 1;
+  bool   vote_commit = 2;     // true = YES/prepared, false = NO/abort
+  string reason    = 3;
+  int64  timestamp = 4;
+}
+
+message DecisionRequest {
+  string tx_id     = 1;
+  int64  timestamp = 2;
+}
+
+message AckResponse {
+  bool  ack       = 1;
+  int64 timestamp = 2;
+}
+
+message DecisionQuery {
+  string tx_id     = 1;
+  int32  node_id   = 2;       // who is asking
+  int64  timestamp = 3;
+}
+
+message DecisionInfo {
+  string tx_id     = 1;
+  string decision  = 2;       // "COMMIT" | "ABORT" | "UNKNOWN"
+  int64  timestamp = 3;
+}
+
+// ----------------------------------------------------------------------------
+//  Coordination: heartbeat + Bully election
+// ----------------------------------------------------------------------------
+message HeartbeatRequest {
+  int32 node_id    = 1;       // sender id
+  int32 leader_id  = 2;       // who the sender thinks the leader is (-1 = none)
+  int64 timestamp  = 3;
+}
+
+message HeartbeatResponse {
+  bool  alive      = 1;
+  int32 node_id    = 2;
+  int32 leader_id  = 3;
+  int64 timestamp  = 4;
+}
+
+message ElectionRequest {
+  int32 node_id    = 1;       // id of the node starting/forwarding the election
+  int64 timestamp  = 2;
+}
+
+message ElectionResponse {
+  bool  alive      = 1;       // "I am alive and have a higher id, back off"
+  int32 node_id    = 2;
+  int64 timestamp  = 3;
+}
+
+message CoordinatorMsg {
+  int32 leader_id  = 1;       // the newly elected leader
+  int64 timestamp  = 2;
+}
+
+message LeaderInfo {
+  int32  leader_id      = 1;
+  string leader_address = 2;
+  int64  timestamp      = 3;
+}
+
+// ----------------------------------------------------------------------------
+//  Recovery / replica control
+// ----------------------------------------------------------------------------
+message SyncRequest {
+  int32 node_id    = 1;       // node asking to be brought up to date
+  int64 timestamp  = 2;
+}
+
+message SyncResponse {
+  repeated KeyValue items = 1; // full snapshot of the node's committed state
+  int64 timestamp         = 2;
+  int64 last_commit_ts    = 3; // Lamport ts of the newest committed transaction
+                               // (lets an election winner detect fresher peers)
 }

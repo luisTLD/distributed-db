@@ -1,1 +1,15 @@
+# virtual environment
 venv/
+.venv/
+
+# python
+__pycache__/
+*.pyc
+
+# generated gRPC stubs (regenerate with scripts/generate_protos.py)
+distdb/generated/database_pb2.py
+distdb/generated/database_pb2_grpc.py
+
+# runtime data (WAL + snapshots) and logs
+data/
+logs/
