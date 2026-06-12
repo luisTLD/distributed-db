@@ -1,9 +1,7 @@
 # Banco de Dados Distribuído (chave-valor) com gRPC, 2PC e Eleição de Líder
 
-Trabalho Prático de **Computação Distribuída** (PUC Minas).
-Tema escolhido: **Sistema de Banco de Dados Distribuído** (opção 7 do enunciado),
-um banco chave-valor replicado, com **replicação síncrona**, **consistência via
-Two-Phase Commit**, **eleição de líder** e **tratamento de falhas**.
+**Sistema de Banco de Dados Distribuído**, um banco chave-valor replicado, com **replicação síncrona**, 
+**consistência via Two-Phase Commit**, **eleição de líder** e **tratamento de falhas**.
 
 O sistema é um conjunto de nós idênticos que se comunicam por **RPC (gRPC)**.
 Um nó atua como **líder** (coordenador das escritas) e os demais como **réplicas**
