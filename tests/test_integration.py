@@ -1,9 +1,10 @@
-"""Simulated-cluster integration test (no gRPC needed).
+"""Teste de integração com cluster simulado (sem gRPC).
 
-Models a 3-node cluster in-process to exercise the same orchestration that
-``distdb.node`` performs over gRPC: leader-coordinated 2PC, replica failure,
-leader failure + Bully election, and state-transfer recovery. This validates the
-end-to-end fault-tolerance behaviour using the real core modules.
+Valida o fluxo COMPLETO de tolerância a falhas — escrita replicada, queda
+de réplica, queda do líder, eleição e recuperação por transferência de
+estado — usando os módulos reais de lógica, mas com a "rede" simulada em
+memória (nó morto = exceção, como um peer gRPC caído). Isso torna o cenário
+determinístico e executável em milissegundos.
 """
 
 import os
@@ -18,13 +19,16 @@ from distdb.election import run_election
 
 
 class SimNode:
+    """Um nó simulado: store + relógio + flag vivo/morto."""
+
     def __init__(self, node_id):
         self.node_id = node_id
         self.store = KeyValueStore()
         self.clock = LamportClock()
         self.alive = True
 
-    # 2PC participant interface (raises when "down", like a dead gRPC peer)
+    # Interface de participante do 2PC (lança exceção quando "morto",
+    # exatamente como um peer gRPC inalcançável).
     def prepare(self, *a):
         if not self.alive:
             raise ConnectionError(f"node {self.node_id} down")
@@ -42,16 +46,18 @@ class SimNode:
 
 
 class SimCluster:
+    """Orquestra os nós simulados como o node.py faz com os reais."""
+
     def __init__(self, ids):
         self.nodes = {i: SimNode(i) for i in ids}
         self.ids = sorted(ids)
-        self.leader = max(self.ids)  # highest id is leader
+        self.leader = max(self.ids)  # maior id começa como líder
 
     def live_ids(self):
         return [i for i in self.ids if self.nodes[i].alive]
 
     def write(self, key, value):
-        """Leader coordinates 2PC over the live cohort, retrying past failures."""
+        """Líder coordena o 2PC sobre o cohort vivo, repetindo após falhas."""
         leader = self.nodes[self.leader]
         tpc = TwoPhaseCommit(leader.clock)
         excluded = set()
@@ -62,14 +68,14 @@ class SimCluster:
                 return res
             if not res.failed_nodes:
                 return res
-            excluded.update(res.failed_nodes)
+            excluded.update(res.failed_nodes)   # exclui os mortos e repete
         return res
 
     def kill(self, node_id):
         self.nodes[node_id].alive = False
 
     def elect(self):
-        """Run Bully from each live node; the highest live id becomes leader."""
+        """Roda o Bully a partir de cada nó vivo; maior id vivo vira líder."""
         for nid in sorted(self.live_ids()):
             def send(peer, _self=nid):
                 return self.nodes[peer].alive
@@ -79,7 +85,7 @@ class SimCluster:
         return self.leader
 
     def sync(self, node_id):
-        """Recovered node pulls the leader's committed state (state transfer)."""
+        """Nó recuperado puxa o estado commitado do líder (state transfer)."""
         leader_state = self.nodes[self.leader].store.snapshot_dict()
         self.nodes[node_id].store.replace_all(leader_state)
         self.nodes[node_id].alive = True
@@ -89,21 +95,21 @@ def test_full_fault_tolerance_flow():
     c = SimCluster([1, 2, 3])
     assert c.leader == 3
 
-    # 1) Normal write replicates atomically to all three nodes.
+    # 1) Escrita normal replica atomicamente nos três nós.
     res = c.write("a", "1")
     assert res.status == COMMITTED
     for i in (1, 2, 3):
         assert c.nodes[i].store.get("a") == (True, "1")
 
-    # 2) A replica dies; writes still commit on the surviving cohort.
+    # 2) Uma réplica morre; escritas seguem commitando no cohort vivo.
     c.kill(2)
     res = c.write("b", "2")
     assert res.status == COMMITTED
     assert c.nodes[1].store.get("b") == (True, "2")
     assert c.nodes[3].store.get("b") == (True, "2")
-    assert c.nodes[2].store.exists("b") is False  # node 2 missed it (it's down)
+    assert c.nodes[2].store.exists("b") is False  # nó 2 perdeu (está morto)
 
-    # 3) The leader dies; survivors elect the highest live id (node 1).
+    # 3) O líder morre; sobreviventes elegem o maior id vivo (nó 1).
     c.kill(3)
     new_leader = c.elect()
     assert new_leader == 1
@@ -111,7 +117,7 @@ def test_full_fault_tolerance_flow():
     assert res.status == COMMITTED
     assert c.nodes[1].store.get("c") == (True, "3")
 
-    # 4) Node 2 recovers and syncs state from the new leader.
+    # 4) Nó 2 volta e sincroniza o estado com o novo líder.
     c.sync(2)
     assert c.nodes[2].store.get("a") == (True, "1")
     assert c.nodes[2].store.get("b") == (True, "2")

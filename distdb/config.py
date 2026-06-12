@@ -1,13 +1,15 @@
-"""Cluster configuration.
+"""Topologia do cluster: ids e endereços dos nós.
 
-A node is identified by a small integer ``id`` and reachable at ``host:port``.
-The Bully election uses the integer id (the highest live id wins), so ids must
-be unique across the cluster.
+Todos os módulos precisam saber quem são os nós do cluster (heartbeat,
+eleição, 2PC e o cliente dependem disso); este arquivo centraliza essa
+informação e o parsing da opção --peers.
 
-The default cluster has three nodes running on localhost. Override it from the
-command line (``--peers``) or by editing :data:`DEFAULT_CLUSTER` to run the
-nodes on different machines of a local network (just replace ``127.0.0.1`` with
-each machine's LAN IP).
+Define NodeInfo (id + host + porta), o cluster padrão de 3 nós em localhost
+(para testes na mesma máquina) e o parse_peers() que lê a topologia da
+linha de comando — é assim que o sistema roda em várias máquinas da rede
+local (basta trocar 127.0.0.1 pelos IPs reais).
+
+Os ids precisam ser únicos: a eleição Bully usa "maior id vivo vence".
 """
 
 from __future__ import annotations
@@ -27,8 +29,7 @@ class NodeInfo:
         return f"{self.host}:{self.port}"
 
 
-# Default 3-node cluster (ids 1, 2, 3). Node 3 starts as the natural leader
-# because it has the highest id.
+# Cluster padrão: 3 nós em localhost. O nó 3 nasce líder natural (maior id).
 DEFAULT_CLUSTER: List[NodeInfo] = [
     NodeInfo(1, "127.0.0.1", 50051),
     NodeInfo(2, "127.0.0.1", 50052),
@@ -37,7 +38,7 @@ DEFAULT_CLUSTER: List[NodeInfo] = [
 
 
 def parse_peers(spec: str) -> List[NodeInfo]:
-    """Parse a cluster spec like ``"1=127.0.0.1:50051,2=127.0.0.1:50052"``."""
+    """Converte "1=127.0.0.1:50051,2=127.0.0.1:50052" em [NodeInfo, ...]."""
     nodes: List[NodeInfo] = []
     for part in spec.split(","):
         part = part.strip()
@@ -50,4 +51,5 @@ def parse_peers(spec: str) -> List[NodeInfo]:
 
 
 def cluster_map(nodes: List[NodeInfo]) -> Dict[int, NodeInfo]:
+    """Indexa a lista de nós por id (acesso rápido: cluster[id])."""
     return {n.node_id: n for n in nodes}

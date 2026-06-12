@@ -3,20 +3,25 @@ syntax = "proto3";
 package distdb;
 
 // ============================================================================
-//  Distributed Key-Value Database service
+//  Serviço do banco de dados chave-valor distribuído
 //
-//  The same service is implemented by every node in the cluster. A node can
-//  act as the LEADER (coordinator of writes) or as a REPLICA (participant),
-//  and the role can change at runtime through leader election.
+//  Este arquivo é o CONTRATO da comunicação: define, num único lugar, todas
+//  as RPCs e mensagens que circulam entre cliente e nós e entre os próprios
+//  nós. A partir dele o gRPC gera o código Python (stubs) usado por node.py
+//  e client.py (rode scripts/generate_protos.py após qualquer edição).
 //
-//  RPC groups:
-//    * Client API .......... Put / Get / Update / Delete / read helpers
-//    * Two-Phase Commit .... Prepare / Commit / Abort  (coordinator -> replica)
-//    * Coordination ........ Heartbeat / Election / Announce / WhoIsLeader
-//    * Recovery ............ SyncState (state transfer to a rejoining node)
+//  Todos os nós implementam ESTE MESMO serviço. Um nó pode agir como LÍDER
+//  (coordenador das escritas) ou RÉPLICA (participante), e o papel muda em
+//  tempo de execução pela eleição.
+//
+//  Grupos de RPCs:
+//    * API do cliente ........ Put / Get / Update / Delete / leituras
+//    * Two-Phase Commit ...... Prepare / Commit / Abort / QueryDecision
+//    * Coordenação ........... Heartbeat / Election / Announce / WhoIsLeader
+//    * Recuperação ........... SyncState (transferência de estado)
 // ============================================================================
 service DatabaseService {
-  // ---- Client-facing API (clients talk to the leader) ----
+  // ---- API do cliente (escritas vão para o líder) ----
   rpc Put     (WriteRequest)  returns (WriteResponse);
   rpc Update  (WriteRequest)  returns (WriteResponse);
   rpc Delete  (DeleteRequest) returns (WriteResponse);
@@ -26,55 +31,55 @@ service DatabaseService {
   rpc Size    (EmptyRequest)  returns (SizeResponse);
   rpc GetAll  (EmptyRequest)  returns (GetAllResponse);
 
-  // ---- Two-Phase Commit (leader -> replicas) ----
+  // ---- Two-Phase Commit (líder -> réplicas) ----
   rpc Prepare (PrepareRequest) returns (VoteResponse);
   rpc Commit  (DecisionRequest) returns (AckResponse);
   rpc Abort   (DecisionRequest) returns (AckResponse);
-  // Termination protocol: an in-doubt participant (prepared, coordinator gone)
-  // asks its peers what was decided for a transaction.
+  // Protocolo de terminação: um participante "em dúvida" (preparado, com o
+  // coordenador morto) pergunta aos peers o que foi decidido da transação.
   rpc QueryDecision (DecisionQuery) returns (DecisionInfo);
 
-  // ---- Cluster coordination ----
+  // ---- Coordenação do cluster ----
   rpc Heartbeat (HeartbeatRequest) returns (HeartbeatResponse);
   rpc Election  (ElectionRequest)  returns (ElectionResponse);
   rpc Announce  (CoordinatorMsg)   returns (AckResponse);
   rpc WhoIsLeader(EmptyRequest)    returns (LeaderInfo);
 
-  // ---- Recovery / replica control ----
+  // ---- Recuperação / controle de réplicas ----
   rpc SyncState (SyncRequest) returns (SyncResponse);
 }
 
 // ----------------------------------------------------------------------------
-//  Common
+//  Comum
 // ----------------------------------------------------------------------------
 message EmptyRequest {
-  int64 timestamp = 1;        // sender's Lamport clock
+  int64 timestamp = 1;        // relógio de Lamport do remetente
 }
 
-// Generic response that also tells the client who the current leader is, so a
-// client that contacted the wrong node can be redirected (NOT_LEADER status).
+// Status devolvido nas escritas. NOT_LEADER permite ao cliente que falou com
+// a réplica errada seguir o redirecionamento até o líder.
 enum Status {
   OK         = 0;
-  NOT_LEADER = 1;   // contacted node is not the leader; see leader_address
-  KEY_ABSENT = 2;   // operation needed an existing key that was not found
-  ABORTED    = 3;   // distributed transaction aborted
-  ERROR      = 4;   // generic failure
+  NOT_LEADER = 1;   // o nó contatado não é o líder; veja leader_address
+  KEY_ABSENT = 2;   // a operação exigia uma chave que não existe
+  ABORTED    = 3;   // transação distribuída abortada
+  ERROR      = 4;   // falha genérica
 }
 
 // ----------------------------------------------------------------------------
-//  Client API
+//  API do cliente
 // ----------------------------------------------------------------------------
 message WriteRequest {
   string key       = 1;
   string value     = 2;
-  int64  timestamp = 3;       // client's Lamport clock
+  int64  timestamp = 3;       // relógio de Lamport do cliente
 }
 
 message WriteResponse {
   Status status         = 1;
   string message        = 2;
-  int64  timestamp      = 3;  // leader's Lamport clock after the operation
-  string leader_address = 4;  // filled when status == NOT_LEADER
+  int64  timestamp      = 3;  // relógio do líder após a operação
+  string leader_address = 4;  // preenchido quando status == NOT_LEADER
 }
 
 message DeleteRequest {
@@ -134,16 +139,16 @@ enum OpType {
 }
 
 message PrepareRequest {
-  string tx_id     = 1;       // unique transaction id
+  string tx_id     = 1;       // id único da transação
   OpType op        = 2;
   string key       = 3;
   string value     = 4;
-  int64  timestamp = 5;       // coordinator's Lamport clock
+  int64  timestamp = 5;       // relógio de Lamport do coordenador
 }
 
 message VoteResponse {
   string tx_id     = 1;
-  bool   vote_commit = 2;     // true = YES/prepared, false = NO/abort
+  bool   vote_commit = 2;     // true = SIM/preparado, false = NÃO/abortar
   string reason    = 3;
   int64  timestamp = 4;
 }
@@ -160,7 +165,7 @@ message AckResponse {
 
 message DecisionQuery {
   string tx_id     = 1;
-  int32  node_id   = 2;       // who is asking
+  int32  node_id   = 2;       // quem está perguntando
   int64  timestamp = 3;
 }
 
@@ -171,11 +176,11 @@ message DecisionInfo {
 }
 
 // ----------------------------------------------------------------------------
-//  Coordination: heartbeat + Bully election
+//  Coordenação: heartbeat + eleição (Bully)
 // ----------------------------------------------------------------------------
 message HeartbeatRequest {
-  int32 node_id    = 1;       // sender id
-  int32 leader_id  = 2;       // who the sender thinks the leader is (-1 = none)
+  int32 node_id    = 1;       // id do remetente
+  int32 leader_id  = 2;       // quem o remetente acha que é o líder (-1 = ninguém)
   int64 timestamp  = 3;
 }
 
@@ -187,18 +192,18 @@ message HeartbeatResponse {
 }
 
 message ElectionRequest {
-  int32 node_id    = 1;       // id of the node starting/forwarding the election
+  int32 node_id    = 1;       // id de quem iniciou/propagou a eleição
   int64 timestamp  = 2;
 }
 
 message ElectionResponse {
-  bool  alive      = 1;       // "I am alive and have a higher id, back off"
+  bool  alive      = 1;       // "estou vivo e tenho id maior: desista"
   int32 node_id    = 2;
   int64 timestamp  = 3;
 }
 
 message CoordinatorMsg {
-  int32 leader_id  = 1;       // the newly elected leader
+  int32 leader_id  = 1;       // o líder recém-eleito
   int64 timestamp  = 2;
 }
 
@@ -209,16 +214,17 @@ message LeaderInfo {
 }
 
 // ----------------------------------------------------------------------------
-//  Recovery / replica control
+//  Recuperação / controle de réplicas
 // ----------------------------------------------------------------------------
 message SyncRequest {
-  int32 node_id    = 1;       // node asking to be brought up to date
+  int32 node_id    = 1;       // nó pedindo para se atualizar
   int64 timestamp  = 2;
 }
 
 message SyncResponse {
-  repeated KeyValue items = 1; // full snapshot of the node's committed state
+  repeated KeyValue items = 1; // estado commitado completo do nó
   int64 timestamp         = 2;
-  int64 last_commit_ts    = 3; // Lamport ts of the newest committed transaction
-                               // (lets an election winner detect fresher peers)
+  int64 last_commit_ts    = 3; // carimbo (Lamport) da última tx commitada
+                               // (deixa o vencedor da eleição detectar
+                               //  peers com estado mais novo)
 }

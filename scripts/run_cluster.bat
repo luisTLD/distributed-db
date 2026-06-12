@@ -1,7 +1,8 @@
 @echo off
-REM Start a local 3-node cluster on Windows, each node in its own console window.
-REM Run this from the project root (the folder that contains the "distdb" package),
-REM with your virtual environment already activated.
+REM Sobe um cluster local de 3 nos no Windows, cada um na propria janela --
+REM evita abrir 3 terminais na mao durante o desenvolvimento.
+REM Execute a partir da raiz do projeto (pasta que contem "distdb"),
+REM com o ambiente virtual (venv) ja ativado.
 
 cd /d "%~dp0.."
 if not exist data mkdir data

@@ -1,21 +1,23 @@
-"""Command-line client for the distributed database.
+"""Cliente de linha de comando do banco distribuído.
 
-The client is *fault tolerant on the read/write path*:
+A porta de entrada do usuário: sem ele, só daria para falar com o cluster
+escrevendo código gRPC na mão. Ele esconde a complexidade do cluster —
+descobre o líder, segue redirecionamentos e sobrevive a nós fora do ar.
 
-* it keeps a connection to every node;
-* **writes** must go to the leader -- if it contacts a replica, the replica
-  answers ``NOT_LEADER`` with the leader's address and the client retries there;
-* if a node is unreachable, the client **fails over** to the next node and, for
-  writes, re-discovers the leader.
+É tolerante a falhas no caminho de leitura e de escrita:
+  * mantém conexão com todos os nós;
+  * ESCRITAS precisam ir ao líder — se contatar uma réplica, ela responde
+    NOT_LEADER com o endereço certo e o cliente refaz lá (redirecionamento);
+  * se um nó está fora do ar, tenta o próximo (failover);
+  * LEITURAS podem ser atendidas por qualquer nó.
 
-It maintains its own Lamport clock so client operations are causally ordered
-with respect to the servers.
+Mantém o próprio relógio de Lamport, ordenando causalmente suas operações
+com as dos servidores.
 
-Usage::
-
-    python -m distdb.client                 # interactive shell
-    python -m distdb.client --demo          # scripted demonstration
-    python -m distdb.client put user Luis    # one-shot command
+Uso:
+    python -m distdb.client                 # modo interativo (prompt db>)
+    python -m distdb.client --demo          # demonstração roteirizada
+    python -m distdb.client put user Luis   # comando único
     python -m distdb.client get user
 """
 
@@ -38,14 +40,15 @@ class ClusterClient:
     def __init__(self, nodes: List[config.NodeInfo]):
         self.nodes = nodes
         self.clock = LamportClock()
+        # Um stub gRPC por nó, criado uma única vez.
         self._stubs = {n.node_id: pb2_grpc.DatabaseServiceStub(
             grpc.insecure_channel(n.address)) for n in nodes}
         self._addr_stub = {n.address: self._stubs[n.node_id] for n in nodes}
-        self._leader_id: Optional[int] = None
+        self._leader_id: Optional[int] = None    # último líder conhecido
 
-    # ---------------------------------------------------------------- helpers
+    # ------------------------------------------------------------- auxiliares
     def _order(self) -> List[int]:
-        """Try the known leader first, then everyone else."""
+        """Ordem de tentativa: líder conhecido primeiro, depois os demais."""
         ids = [n.node_id for n in self.nodes]
         if self._leader_id in ids:
             ids = [self._leader_id] + [i for i in ids if i != self._leader_id]
@@ -54,12 +57,13 @@ class ClusterClient:
     def _stub_for_address(self, address: str):
         return self._addr_stub.get(address)
 
-    # ------------------------------------------------------------------ writes
+    # --------------------------------------------------------------- escritas
     def _write(self, kind: str, key: str, value: str = "") -> str:
+        # Tenta cada nó na ordem; dentro de um nó, segue redirecionamentos.
         last_err = "no nodes reachable"
         for node_id in self._order():
             stub = self._stubs[node_id]
-            current_id = node_id          # id of the node `stub` points at
+            current_id = node_id          # id do nó que `stub` aponta agora
             for _ in range(len(self.nodes) + 1):
                 ts = self.clock.tick()
                 try:
@@ -71,20 +75,20 @@ class ClusterClient:
                                 else stub.Update(req, timeout=5))
                     self.clock.update(resp.timestamp)
                     if resp.status == pb2.NOT_LEADER:
-                        # Follow the redirect to the leader.
+                        # Não era o líder: sigo o redirecionamento informado.
                         nxt = self._stub_for_address(resp.leader_address)
                         if nxt is None or nxt is stub:
-                            break
+                            break        # líder desconhecido: tenta outro nó
                         stub = nxt
                         current_id = self._id_for_address(resp.leader_address)
                         self._leader_id = current_id
                         continue
-                    # Remember who actually served us as the leader.
+                    # Sucesso: memoriza quem de fato atendeu como líder.
                     self._leader_id = current_id
                     return resp.message
                 except grpc.RpcError as exc:
                     last_err = f"node {current_id} unreachable ({exc.code().name})"
-                    break  # fail over to the next node
+                    break  # failover: próximo nó da lista
         return f"ERROR: {last_err}"
 
     def _id_for_address(self, address: str) -> Optional[int]:
@@ -97,8 +101,9 @@ class ClusterClient:
     def update(self, key, value): return self._write("update", key, value)
     def delete(self, key):        return self._write("delete", key)
 
-    # ------------------------------------------------------------------- reads
+    # --------------------------------------------------------------- leituras
     def _read(self, fn):
+        # Leituras valem em qualquer nó: tenta na ordem até um responder.
         last_err = "no nodes reachable"
         for node_id in self._order():
             try:
@@ -156,7 +161,7 @@ class ClusterClient:
         return self._read(fn)
 
 
-# --------------------------------------------------------------------------- UI
+# ------------------------------------------------------------ interface (UI)
 HELP = """commands:
   put <key> <value>     store / overwrite a key (2PC across replicas)
   update <key> <value>  update an existing key
@@ -173,6 +178,7 @@ HELP = """commands:
 
 
 def run_command(client: ClusterClient, parts: List[str]) -> bool:
+    # Interpreta UMA linha de comando; devolve False para encerrar.
     cmd = parts[0].lower()
     try:
         if cmd in ("quit", "exit"):
@@ -206,6 +212,7 @@ def run_command(client: ClusterClient, parts: List[str]) -> bool:
 
 
 def interactive(client: ClusterClient):
+    # Prompt db> em loop até quit/Ctrl+C.
     print("distributed-db client. type 'help' for commands.")
     print(client.who_is_leader())
     while True:
@@ -221,6 +228,7 @@ def interactive(client: ClusterClient):
 
 
 def demo(client: ClusterClient):
+    # Sequência pronta de operações — útil na apresentação.
     print("== scripted demo ==")
     print(client.who_is_leader())
     print("put user Luis       ->", client.put("user", "Luis"))
@@ -229,7 +237,7 @@ def demo(client: ClusterClient):
     print("update user Carlos   ->", client.update("user", "Carlos"))
     print("get user             ->", client.get("user"))
     print("exists lang          ->", client.exists("lang"))
-    print("update missing X     ->", client.update("missing", "X"))  # aborts
+    print("update missing X     ->", client.update("missing", "X"))  # aborta
     print("list                 ->", client.list_keys())
     print("size                 ->", client.size())
     print("delete lang          ->", client.delete("lang"))
@@ -239,8 +247,8 @@ def demo(client: ClusterClient):
 def main():
     parser = argparse.ArgumentParser(description="Distributed DB client")
     parser.add_argument("--peers", type=str, default=None)
-    parser.add_argument("--demo", action="store_true", help="run a scripted demo")
-    parser.add_argument("command", nargs="*", help="one-shot command")
+    parser.add_argument("--demo", action="store_true", help="roda a demo roteirizada")
+    parser.add_argument("command", nargs="*", help="comando único (ex.: put k v)")
     args = parser.parse_args()
 
     nodes = config.parse_peers(args.peers) if args.peers else config.DEFAULT_CLUSTER

@@ -1,31 +1,26 @@
 #!/usr/bin/env python3
-"""High-concurrency stress test + cluster-wide consistency check.
+"""Teste de estresse (alta concorrência) + verificação de consistência.
 
-Answers the question "how does the system behave under many simultaneous
-requests?". It launches N client threads that hammer the cluster at the same
-time with a mixed workload:
+Responde "como o sistema se comporta com MUITAS requisições simultâneas?" e
+serve de palco para demonstrar a tolerância a falhas sob carga: dá para
+derrubar um nó (ou o líder) no meio do teste e ver o sistema se recuperar.
 
-* writes to a small set of HOT keys  -> heavy contention on the same keys,
-  exercising the mutual-exclusion path (leader-side serialization + per-key
-  locks in the 2PC prepare);
-* writes to per-thread unique keys   -> parallel, conflict-free load;
-* reads (served by any node).
+Dispara N threads-cliente ao mesmo tempo com carga mista:
+  * escritas em poucas chaves QUENTES disputadas por todos -> estressa a
+    exclusão mútua (serialização no líder + locks por chave no 2PC);
+  * escritas em chaves únicas por thread -> paralelismo sem conflito;
+  * leituras (atendidas por qualquer nó).
 
-While it runs you can KILL a replica or even the LEADER to watch the
-fault-tolerance behaviour under load: throughput dips for a few seconds
-(failure detection + election / cohort shrink) and then recovers, without
-inconsistency. A per-second progress line makes the dip visible.
+Imprime a vazão por segundo durante a execução (a queda na re-eleição fica
+visível) e, ao final:
+  1. vazão total, latências p50/p95/p99 e contagem committed/aborted/failed;
+  2. CONSISTÊNCIA: lê o estado completo de CADA nó vivo e confere que todos
+     têm exatamente os mesmos dados.
 
-At the end the script:
-1. prints throughput, latency percentiles (p50/p95/p99) and the breakdown of
-   committed / aborted / failed operations;
-2. queries EVERY reachable node individually and checks that they hold exactly
-   the same data (replication consistency check).
-
-Usage (cluster already running):
-    python scripts/stress_test.py                          # 8 clients x 100 ops
+Uso (cluster já no ar):
+    python scripts/stress_test.py                          # 8 clientes x 100 ops
     python scripts/stress_test.py --clients 16 --ops 200
-    python scripts/stress_test.py --hot-ratio 0.5          # more contention
+    python scripts/stress_test.py --hot-ratio 0.5          # mais disputa
     python scripts/stress_test.py --peers "1=192.168.0.10:50051,..."
 """
 
@@ -41,15 +36,16 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from distdb import config
 from distdb.client import ClusterClient
 
+# Chaves "quentes": todas as threads disputam estas mesmas chaves.
 HOT_KEYS = ["hot_a", "hot_b", "hot_c", "hot_d"]
 
 
 class Stats:
-    """Thread-safe accumulator for operation results."""
+    """Acumulador thread-safe dos resultados das operações."""
 
     def __init__(self):
         self.lock = threading.Lock()
-        self.write_lat = []          # seconds, successful writes only
+        self.write_lat = []          # latências (s) das escritas com sucesso
         self.read_lat = []
         self.committed = 0
         self.aborted = 0
@@ -58,6 +54,7 @@ class Stats:
         self.reads_err = 0
 
     def record_write(self, msg: str, dt: float):
+        # Classifica pela mensagem devolvida pelo servidor.
         with self.lock:
             if "committed" in msg:
                 self.committed += 1
@@ -82,6 +79,7 @@ class Stats:
 
 
 def percentile(sorted_vals, p):
+    # Percentil simples sobre uma lista já ordenada.
     if not sorted_vals:
         return 0.0
     idx = min(len(sorted_vals) - 1, int(round((p / 100.0) * (len(sorted_vals) - 1))))
@@ -89,11 +87,13 @@ def percentile(sorted_vals, p):
 
 
 def worker(tid, nodes, ops, hot_ratio, read_ratio, stats, barrier):
-    client = ClusterClient(nodes)          # each thread = an independent client
+    # Cada thread é um cliente gRPC independente.
+    client = ClusterClient(nodes)
     rng = random.Random(1000 + tid)
-    barrier.wait()                         # all threads start at the same time
+    barrier.wait()                         # todas começam juntas
     for i in range(ops):
         if rng.random() < read_ratio:
+            # Operação de LEITURA.
             key = rng.choice(HOT_KEYS) if rng.random() < hot_ratio \
                 else f"k_{tid}_{rng.randrange(max(1, i + 1))}"
             t0 = time.perf_counter()
@@ -103,15 +103,16 @@ def worker(tid, nodes, ops, hot_ratio, read_ratio, stats, barrier):
             except RuntimeError:
                 stats.record_read(False, 0.0)
         else:
+            # Operação de ESCRITA: chave quente (disputa) ou única (paralela).
             if rng.random() < hot_ratio:
-                key = rng.choice(HOT_KEYS)     # contended key
+                key = rng.choice(HOT_KEYS)
             else:
-                key = f"k_{tid}_{i}"           # unique key (no conflicts)
+                key = f"k_{tid}_{i}"
             t0 = time.perf_counter()
             msg = client.put(key, f"v{tid}_{i}")
-            # If the write failed (e.g. it fell inside a leader-election
-            # window), retry a few times: no request is lost, it just waits
-            # for the new leader. The retry time shows up in the p99 latency.
+            # Se a escrita caiu na janela de uma eleição, repete algumas
+            # vezes: nenhuma requisição se perde, ela só espera o novo
+            # líder. O tempo de espera aparece na latência p99.
             attempts = 1
             while ("committed" not in msg and "aborted" not in msg
                    and attempts < 4):
@@ -122,7 +123,7 @@ def worker(tid, nodes, ops, hot_ratio, read_ratio, stats, barrier):
 
 
 def progress_monitor(stats, total, stop_evt):
-    """Print ops/s once per second so failures injected mid-run are visible."""
+    """Imprime ops/s a cada segundo (falhas injetadas no meio ficam visíveis)."""
     last = 0
     while not stop_evt.wait(1.0):
         cur = stats.done()
@@ -134,12 +135,12 @@ def progress_monitor(stats, total, stop_evt):
 
 
 def consistency_check(nodes):
-    """Fetch the full dataset from every node and compare them."""
+    """Baixa o estado completo de cada nó e compara todos entre si."""
     print("\n[consistency check] reading the full state of every node:")
     states, unreachable = {}, []
     for n in nodes:
         try:
-            c = ClusterClient([n])             # client pinned to a single node
+            c = ClusterClient([n])             # cliente preso a UM nó
             states[n.node_id] = dict(c.get_all())
             print(f"  node {n.node_id} ({n.address}): {len(states[n.node_id])} keys")
         except RuntimeError:
@@ -151,6 +152,7 @@ def consistency_check(nodes):
         print("  fewer than two reachable nodes -- nothing to compare.")
         return True
 
+    # Compara todo mundo contra o primeiro nó alcançável.
     ref_id, ref = ids[0], states[ids[0]]
     consistent = True
     for nid in ids[1:]:
@@ -176,13 +178,13 @@ def consistency_check(nodes):
 def main():
     ap = argparse.ArgumentParser(description="Concurrent stress test")
     ap.add_argument("--clients", type=int, default=8,
-                    help="number of simultaneous client threads (default 8)")
+                    help="threads-cliente simultâneas (padrão 8)")
     ap.add_argument("--ops", type=int, default=100,
-                    help="operations per client (default 100)")
+                    help="operações por cliente (padrão 100)")
     ap.add_argument("--hot-ratio", type=float, default=0.3,
-                    help="fraction of writes aimed at a few contended keys (default 0.3)")
+                    help="fração de escritas nas chaves disputadas (padrão 0.3)")
     ap.add_argument("--read-ratio", type=float, default=0.3,
-                    help="fraction of operations that are reads (default 0.3)")
+                    help="fração de operações que são leituras (padrão 0.3)")
     ap.add_argument("--peers", type=str, default=None)
     args = ap.parse_args()
 
@@ -197,6 +199,7 @@ def main():
     print("       the failure handling under load.")
     print("=" * 66)
 
+    # Sobe as threads-cliente; a barreira garante o início simultâneo.
     stats = Stats()
     barrier = threading.Barrier(args.clients + 1)
     threads = [threading.Thread(target=worker,
@@ -219,6 +222,7 @@ def main():
     elapsed = time.perf_counter() - t0
     stop_evt.set()
 
+    # ----------------------------- relatório final -----------------------
     writes = stats.committed + stats.aborted + stats.errors
     wl = sorted(stats.write_lat)
     rl = sorted(stats.read_lat)

@@ -1,3 +1,10 @@
+"""Testes do Two-Phase Commit, do quórum e do protocolo de terminação.
+
+Provam as garantias centrais das transações distribuídas — atomicidade
+(tudo-ou-nada), aborto em caso de voto NÃO ou falha, recusa sem quórum e a
+resolução de transações "em dúvida" quando o coordenador morre. Os
+participantes são stores locais, então tudo roda sem rede.
+"""
 import os
 import sys
 
@@ -10,7 +17,7 @@ from distdb.coordinator import (TwoPhaseCommit, COMMITTED, ABORTED,
 
 
 class StoreParticipant:
-    """Adapts a KeyValueStore to the coordinator's Participant interface."""
+    """Adapta um KeyValueStore à interface de participante do coordenador."""
 
     def __init__(self, node_id, store):
         self.node_id = node_id
@@ -27,7 +34,7 @@ class StoreParticipant:
 
 
 class FlakyParticipant(StoreParticipant):
-    """A participant whose prepare/commit raise to simulate a crash."""
+    """Participante que lança exceção — simula um nó que caiu."""
 
     def __init__(self, node_id, store, fail_on="prepare"):
         super().__init__(node_id, store)
@@ -46,19 +53,20 @@ def make_cluster(n=3):
 
 
 def test_commit_replicates_to_all():
+    # Caminho feliz: todos votam SIM -> commit atômico em todos.
     stores, parts = make_cluster(3)
     tpc = TwoPhaseCommit(LamportClock())
     res = tpc.execute(parts, PUT, "a", "1")
     assert res.status == COMMITTED
     assert res.yes_votes == 3 and res.cohort_size == 3
     for s in stores:
-        assert s.get("a") == (True, "1")   # atomic: visible on every node
+        assert s.get("a") == (True, "1")   # visível em TODOS os nós
 
 
 def test_abort_when_one_votes_no():
+    # UPDATE de chave inexistente -> votos NÃO -> aborta em todos.
     stores, parts = make_cluster(3)
     tpc = TwoPhaseCommit(LamportClock())
-    # UPDATE on a missing key -> every participant votes NO
     res = tpc.execute(parts, UPDATE, "missing", "x")
     assert res.status == ABORTED
     for s in stores:
@@ -66,6 +74,7 @@ def test_abort_when_one_votes_no():
 
 
 def test_participant_failure_aborts_and_is_reported():
+    # Participante caído na votação -> aborta sem expor dado parcial.
     s_ok1, s_ok2 = KeyValueStore(), KeyValueStore()
     parts = [
         StoreParticipant(1, s_ok1),
@@ -76,15 +85,15 @@ def test_participant_failure_aborts_and_is_reported():
     res = tpc.execute(parts, PUT, "a", "1")
     assert res.status == ABORTED
     assert 2 in res.failed_nodes
-    # the healthy nodes did NOT expose the value (atomicity preserved)
+    # Os nós saudáveis NÃO expuseram o valor (atomicidade preservada).
     assert s_ok1.exists("a") is False
     assert s_ok2.exists("a") is False
 
 
 def test_retry_after_excluding_failed_node_succeeds():
-    """Mirrors what the node layer does: drop the dead replica, retry, commit."""
+    """Espelha o que o nó faz: exclui a réplica morta, repete e commita."""
     s1, s3 = KeyValueStore(), KeyValueStore()
-    live = [StoreParticipant(1, s1), StoreParticipant(3, s3)]  # node 2 excluded
+    live = [StoreParticipant(1, s1), StoreParticipant(3, s3)]  # nó 2 excluído
     tpc = TwoPhaseCommit(LamportClock())
     res = tpc.execute(live, PUT, "a", "1")
     assert res.status == COMMITTED
@@ -92,52 +101,53 @@ def test_retry_after_excluding_failed_node_succeeds():
 
 
 def test_no_quorum_aborts_without_touching_stores():
-    """With 2 of 3 nodes down, the lone leader must refuse the write."""
+    """Com 2 de 3 nós mortos, o líder sozinho deve recusar a escrita."""
     s1 = KeyValueStore()
-    alone = [StoreParticipant(1, s1)]              # 1 participant, majority is 2
+    alone = [StoreParticipant(1, s1)]              # 1 participante; maioria = 2
     tpc = TwoPhaseCommit(LamportClock())
     res = tpc.execute(alone, PUT, "a", "1", min_participants=2)
     assert res.status == ABORTED
     assert "quorum" in res.reason
-    assert s1.exists("a") is False                 # nothing was even prepared
+    assert s1.exists("a") is False                 # nem chegou a preparar
 
 
 def test_quorum_satisfied_commits():
-    stores, parts = make_cluster(2)                # 2 of 3 alive = majority
+    # 2 de 3 vivos = maioria -> a escrita passa.
+    stores, parts = make_cluster(2)
     tpc = TwoPhaseCommit(LamportClock())
     res = tpc.execute(parts, PUT, "a", "1", min_participants=2)
     assert res.status == COMMITTED
 
 
 def test_termination_decision_rules():
-    """Cooperative termination for in-doubt participants."""
-    # someone saw COMMIT -> the tx was decided commit; finish it
+    """Regras da terminação cooperativa para participantes em dúvida."""
+    # Alguém viu COMMIT -> a decisão foi commit; terminar commitando.
     assert termination_decision(["UNKNOWN", "COMMIT"]) == "COMMIT"
-    # peers saw the abort -> abort
+    # Peers viram o abort -> abortar.
     assert termination_decision(["ABORT", "UNKNOWN"]) == "ABORT"
-    # nobody knows anything (coordinator died before deciding) -> presumed abort
+    # Ninguém sabe nada (coordenador morreu antes de decidir) -> presumed abort.
     assert termination_decision(["UNKNOWN", "UNKNOWN"]) == "ABORT"
     assert termination_decision([]) == "ABORT"
 
 
 def test_in_doubt_participant_resolves_from_peer():
-    """End-to-end termination: coordinator dies after sending COMMIT to only
-    one participant; the stuck one learns the decision from its peer."""
+    """Ponta a ponta: coordenador morre depois de commitar em SÓ UM
+    participante; o que ficou preso descobre a decisão pelo peer."""
     s1, s2 = KeyValueStore(), KeyValueStore()
-    # phase 1 on both participants
+    # Fase 1 nos dois participantes.
     assert s1.prepare("tx9", PUT, "k", "v", 1)[0]
     assert s2.prepare("tx9", PUT, "k", "v", 1)[0]
-    # coordinator decided COMMIT but only reached s1 before crashing
+    # O coordenador decidiu COMMIT mas só alcançou s1 antes de morrer.
     s1.commit("tx9", 2)
-    # s2 is in doubt: key still locked, value invisible
+    # s2 está em dúvida: chave travada, valor invisível.
     assert s2.exists("k") is False
     assert s2.is_locked_by_other("k", "other-tx")
-    # termination: s2 asks the peers and applies the decision
+    # Terminação: s2 consulta o peer e aplica a decisão.
     outcome = termination_decision([s1.decision_of("tx9")])
     assert outcome == "COMMIT"
     s2.commit("tx9", 3)
-    assert s2.get("k") == (True, "v")              # consistent with s1
-    assert not s2.is_locked_by_other("k", "other-tx")   # lock released
+    assert s2.get("k") == (True, "v")                   # consistente com s1
+    assert not s2.is_locked_by_other("k", "other-tx")   # lock liberado
 
 
 if __name__ == "__main__":

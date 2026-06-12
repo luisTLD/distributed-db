@@ -1,14 +1,16 @@
-"""Lamport logical clock (manual implementation).
+"""Relógio lógico de Lamport — implementação manual.
 
-Each process keeps a monotonically increasing counter. The rules are:
+Em um sistema distribuído não há relógio físico confiável comum a todas as
+máquinas. O relógio de Lamport dá uma ORDEM aos eventos do cluster sem
+depender de hora de parede: se o evento A causou o evento B, então
+C(A) < C(B) (relação happened-before).
 
-* before a local event / sending a message: ``clock += 1``;
-* on receiving a message carrying timestamp ``t``:
-  ``clock = max(clock, t) + 1``.
+Cada processo mantém um contador inteiro com as duas regras clássicas:
+  1. antes de um evento local / envio de mensagem: clock += 1  (tick)
+  2. ao receber uma mensagem com carimbo t: clock = max(clock, t) + 1 (update)
 
-This gives the happened-before guarantee: if event *a* causally precedes event
-*b*, then ``C(a) < C(b)``. We use it to order operations across the cluster and
-to timestamp transactions.
+No projeto, todo RPC carrega esse carimbo; ele data as transações no WAL e o
+last_commit_ts (usado na eleição) é derivado dele.
 """
 
 from __future__ import annotations
@@ -19,7 +21,7 @@ import threading
 class LamportClock:
     def __init__(self, start: int = 0) -> None:
         self._value = start
-        self._lock = threading.Lock()
+        self._lock = threading.Lock()   # várias threads usam o mesmo relógio
 
     @property
     def value(self) -> int:
@@ -27,13 +29,13 @@ class LamportClock:
             return self._value
 
     def tick(self) -> int:
-        """Advance the clock for a local event and return the new value."""
+        """Regra 1: avança o relógio para um evento local e devolve o valor."""
         with self._lock:
             self._value += 1
             return self._value
 
     def update(self, received_timestamp: int) -> int:
-        """Merge an incoming timestamp and return the new clock value."""
+        """Regra 2: funde um carimbo recebido e devolve o novo valor."""
         with self._lock:
             self._value = max(self._value, int(received_timestamp)) + 1
             return self._value

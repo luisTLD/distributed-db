@@ -1,5 +1,8 @@
 #!/usr/bin/env python3
-"""Run every unit/integration test in this folder (no pytest required).
+"""Executa todos os testes desta pasta (sem precisar de pytest).
+
+Um único comando para validar toda a lógica distribuída — não precisa de
+rede nem do cluster no ar:
 
     python tests/run_all.py
 """
@@ -12,6 +15,7 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 
 def main():
     failures = 0
+    # Roda cada arquivo test_*.py como se fosse chamado direto.
     for path in sorted(glob.glob(os.path.join(HERE, "test_*.py"))):
         name = os.path.basename(path)
         try:

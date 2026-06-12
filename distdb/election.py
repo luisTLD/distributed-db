@@ -1,17 +1,16 @@
-"""Bully leader-election algorithm -- manual implementation.
+"""Eleição de líder — algoritmo do valentão (Bully), implementação manual.
 
-The node with the highest id that is alive must become the leader (coordinator
-of writes). When a node notices the leader is gone it runs an election:
+O sistema precisa de exatamente UM líder para coordenar as escritas. Se o
+líder morre, os sobreviventes escolhem outro sozinhos, sem intervenção
+humana — é isso que este algoritmo resolve, pela regra "o nó VIVO de maior
+id é o líder". Quando um nó percebe que o líder sumiu:
+  1. envia ELECTION para todos os nós de id MAIOR que o seu;
+  2. se NINGUÉM responde -> ele venceu: anuncia-se líder (COORDINATOR);
+  3. se ALGUÉM maior responde ("estou vivo") -> ele desiste; o maior conduz
+     a própria eleição e fará o anúncio.
 
-1. It sends an ``ELECTION`` message to every node with a **higher** id.
-2. If no higher node answers, it wins and announces itself as the new leader
-   (``COORDINATOR``/``Announce``) to everyone else.
-3. If some higher node answers ("I'm alive, back off"), this node drops out and
-   waits -- the higher node will run its own election and eventually announce.
-
-This module contains only the decision logic so it can be unit-tested without
-any networking. The actual message sending and the COORDINATOR broadcast live
-in :mod:`distdb.node`.
+Este módulo contém SÓ a lógica de decisão (testável sem rede). O envio real
+das mensagens e o anúncio ficam em node.py.
 """
 
 from __future__ import annotations
@@ -20,18 +19,19 @@ from typing import Callable, List, Tuple
 
 
 def higher_ids(node_id: int, all_ids: List[int]) -> List[int]:
+    """Ids maiores que o meu (os únicos que preciso desafiar)."""
     return sorted(i for i in all_ids if i > node_id)
 
 
 def run_election(node_id: int, all_ids: List[int],
                  send_election: Callable[[int], bool]) -> Tuple[bool, List[int]]:
-    """Run one round of the Bully election from *node_id*'s point of view.
+    """Roda uma rodada de eleição do ponto de vista de node_id.
 
-    *send_election(peer_id)* must return True if that higher-id peer is alive and
-    answered the ELECTION message, False if it is unreachable.
+    send_election(peer_id) deve devolver True se o peer de id maior está vivo
+    e respondeu ao ELECTION; False se está inalcançável.
 
-    Returns ``(became_leader, answering_peers)``. ``became_leader`` is True when
-    no higher node answered, meaning this node should announce itself leader.
+    Devolve (virei_lider, quem_respondeu): virei_lider=True quando nenhum nó
+    maior respondeu — este nó deve se anunciar líder.
     """
     answered: List[int] = []
     for peer in higher_ids(node_id, all_ids):
@@ -39,7 +39,7 @@ def run_election(node_id: int, all_ids: List[int],
             if send_election(peer):
                 answered.append(peer)
         except Exception:
-            # Treat an unreachable higher peer as "did not answer".
+            # Peer maior inalcançável conta como "não respondeu".
             continue
     became_leader = len(answered) == 0
     return became_leader, answered

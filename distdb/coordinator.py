@@ -1,27 +1,24 @@
-"""Two-Phase Commit (2PC) coordinator -- manual implementation.
+"""Coordenador do Two-Phase Commit (2PC) — implementação manual.
 
-The coordinator drives an atomic write across a set of *participants* (the
-leader's own local store plus the live replicas). It is transport agnostic: a
-participant is any object exposing ``prepare`` / ``commit`` / ``abort``. In the
-unit tests these are local in-memory participants; in production they are
-gRPC-backed proxies that call the remote ``Prepare``/``Commit``/``Abort`` RPCs.
+É o algoritmo que garante a ATOMICIDADE das escritas replicadas: ou todos
+os nós aplicam a operação, ou nenhum aplica. Sem ele, uma queda no meio de
+uma escrita deixaria réplicas com valores diferentes.
 
-Protocol
---------
-Phase 1 -- VOTING
-    Coordinator sends ``PREPARE(tx, op, key, value)`` to every participant.
-    Each participant locks the key, validates, makes the intent durable in its
-    write-ahead log, and votes YES or NO. An unreachable participant counts as
-    NO (and is reported so the caller can mark it failed).
+Dirige a transação sobre um conjunto de "participantes" (o store local do
+líder + as réplicas vivas) e é agnóstico de transporte: participante é
+qualquer objeto com prepare/commit/abort — nos testes são objetos locais,
+em produção são proxies gRPC (ver node.py).
 
-Phase 2 -- DECISION
-    * If *every* participant voted YES -> send ``COMMIT(tx)`` to all. The write
-      becomes visible atomically on all of them.
-    * If *any* participant voted NO or was unreachable -> send ``ABORT(tx)`` to
-      all. No participant exposes the change; locks are released.
+Protocolo:
+  Fase 1 — VOTAÇÃO: envia PREPARE(tx, op, chave, valor) a cada participante,
+    que trava a chave, valida, grava a intenção no WAL e vota SIM ou NÃO.
+    Participante inalcançável conta como NÃO (e é reportado ao chamador).
+  Fase 2 — DECISÃO: todos SIM -> COMMIT em todos (escrita visível
+    atomicamente). Algum NÃO ou falha -> ABORT em todos (ninguém aplica,
+    locks liberados).
 
-This guarantees atomicity (all-or-nothing) and, together with the per-key locks
-held between PREPARE and the decision, isolation of conflicting writes.
+Também contém a regra de decisão do protocolo de terminação
+(termination_decision), usada por participantes "em dúvida".
 """
 
 from __future__ import annotations
@@ -35,6 +32,7 @@ ABORTED = "ABORTED"
 
 
 class Participant(Protocol):
+    """Interface mínima que o coordenador exige de um participante."""
     node_id: int
 
     def prepare(self, tx_id: str, op: str, key: str, value: str, timestamp: int) -> Tuple[bool, str]:
@@ -49,6 +47,7 @@ class Participant(Protocol):
 
 @dataclass
 class TxResult:
+    """Resultado de uma transação: status, motivo e estatísticas de votos."""
     status: str
     tx_id: str
     timestamp: int
@@ -60,17 +59,16 @@ class TxResult:
 
 class TwoPhaseCommit:
     def __init__(self, clock) -> None:
-        self._clock = clock
+        self._clock = clock          # relógio de Lamport do coordenador
 
     def execute(self, participants: List[Participant], op: str, key: str,
                 value: str = "", min_participants: int = 0) -> TxResult:
-        tx_id = uuid.uuid4().hex[:12]
+        tx_id = uuid.uuid4().hex[:12]            # id único da transação
         ts = self._clock.tick()
 
-        # Quorum check (replica control / split-brain protection): refuse to
-        # run a transaction over fewer participants than the required majority.
-        # A leader isolated in a minority partition therefore cannot commit
-        # writes that the majority side would never see.
+        # Checagem de QUÓRUM (controle de réplicas / anti split-brain):
+        # recusa a transação se há menos participantes vivos que a maioria.
+        # Um líder isolado numa partição minoritária não consegue commitar.
         if len(participants) < min_participants:
             return TxResult(
                 ABORTED, tx_id, ts,
@@ -82,7 +80,7 @@ class TwoPhaseCommit:
         failed_nodes: List[int] = []
         abort_reason = ""
 
-        # ---------------- Phase 1: voting ----------------
+        # ---------------- Fase 1: votação ----------------
         for p in participants:
             try:
                 vote, reason = p.prepare(tx_id, op, key, value, ts)
@@ -90,27 +88,27 @@ class TwoPhaseCommit:
                     votes_yes += 1
                 else:
                     abort_reason = abort_reason or f"node {p.node_id}: {reason}"
-            except Exception as exc:  # transport / participant failure
+            except Exception as exc:  # falha de transporte/participante
                 failed_nodes.append(p.node_id)
                 abort_reason = abort_reason or f"node {p.node_id} unreachable: {exc}"
 
         all_yes = (votes_yes == len(participants)) and not failed_nodes
 
-        # ---------------- Phase 2: decision ----------------
+        # ---------------- Fase 2: decisão ----------------
         decision_ts = self._clock.tick()
         if all_yes:
             for p in participants:
                 try:
                     p.commit(tx_id, decision_ts)
-                except Exception as exc:
-                    # The participant voted YES (is prepared) and is durable; it
-                    # will finish the commit from its WAL on recovery. We still
-                    # flag it so the failure detector notices.
+                except Exception:
+                    # Votou SIM e está durável: ao se recuperar, termina o
+                    # commit pelo WAL/terminação. Só sinalizamos a falha.
                     failed_nodes.append(p.node_id)
             return TxResult(COMMITTED, tx_id, decision_ts,
                             yes_votes=votes_yes, cohort_size=len(participants),
                             failed_nodes=failed_nodes)
 
+        # Algum NÃO ou falha: aborta em todos (ninguém aplica nada).
         for p in participants:
             try:
                 p.abort(tx_id, decision_ts)
@@ -122,15 +120,15 @@ class TwoPhaseCommit:
 
 
 def termination_decision(peer_decisions: List[str]) -> str:
-    """Cooperative termination rule for an in-doubt 2PC participant.
+    """Regra de terminação cooperativa para um participante "em dúvida".
 
-    A participant prepared a transaction but never heard the decision (the
-    coordinator crashed). It asks the other participants what they know:
+    Ele preparou a transação e nunca soube a decisão (o coordenador morreu).
+    Pergunta aos demais participantes o que sabem:
 
-    * if ANY peer saw ``COMMIT``  -> the coordinator decided commit; apply it;
-    * otherwise (peers saw ABORT or nothing) -> abort ("presumed abort"). This
-      is safe because the coordinator only sends COMMIT after every YES vote,
-      so if no reachable peer committed, no client was told the write succeeded.
+    * se ALGUM peer viu COMMIT  -> a decisão foi commit; aplica também;
+    * caso contrário            -> aborta ("presumed abort"). Seguro, pois o
+      coordenador só envia COMMIT depois de TODOS os votos SIM; se nenhum
+      peer alcançável commitou, nenhum cliente recebeu confirmação.
     """
     if any(d == "COMMIT" for d in peer_decisions):
         return "COMMIT"

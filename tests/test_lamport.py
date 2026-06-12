@@ -1,3 +1,8 @@
+"""Testes do relógio lógico de Lamport (distdb/lamport.py).
+
+Garantem que as duas regras do algoritmo estão corretas — todo o
+ordenamento causal do sistema depende delas.
+"""
 import os
 import sys
 
@@ -7,6 +12,7 @@ from distdb.lamport import LamportClock
 
 
 def test_tick_is_monotonic():
+    # Regra 1: cada evento local avança o contador em 1.
     c = LamportClock()
     assert c.tick() == 1
     assert c.tick() == 2
@@ -14,6 +20,7 @@ def test_tick_is_monotonic():
 
 
 def test_update_takes_max_plus_one():
+    # Regra 2: ao receber carimbo t, o relógio vira max(local, t) + 1.
     c = LamportClock(start=5)
     assert c.update(3) == 6      # max(5,3)+1
     assert c.update(20) == 21    # max(6,20)+1
@@ -21,11 +28,12 @@ def test_update_takes_max_plus_one():
 
 
 def test_happens_before():
+    # Se A causou B (mensagem de A para B), então C(A) < C(B).
     a = LamportClock()
     b = LamportClock()
-    ta = a.tick()          # event on A
-    tb = b.update(ta)      # B receives message from A
-    assert tb > ta         # causal order preserved
+    ta = a.tick()          # evento em A
+    tb = b.update(ta)      # B recebe a mensagem de A
+    assert tb > ta         # ordem causal preservada
 
 
 if __name__ == "__main__":

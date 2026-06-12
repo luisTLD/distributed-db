@@ -13,3 +13,5 @@ distdb/generated/database_pb2_grpc.py
 # runtime data (WAL + snapshots) and logs
 data/
 logs/
+
+relatorio/

@@ -1,11 +1,14 @@
 #!/usr/bin/env python3
-"""Compile proto/database.proto into distdb/generated/.
+"""Compila proto/database.proto para distdb/generated/.
 
-Generates ``database_pb2.py`` and ``database_pb2_grpc.py`` and rewrites the
-absolute import inside the *_grpc file into a package-relative one so the code
-works when imported as ``distdb.generated``.
+O gRPC não lê o .proto em tempo de execução — ele precisa do código Python
+gerado (stubs). Sem rodar este script, os nós nem iniciam (erro de import).
+Rode-o uma vez após clonar o projeto e SEMPRE que o database.proto mudar.
 
-Usage:  python scripts/generate_protos.py
+Gera database_pb2.py e database_pb2_grpc.py e conserta o import absoluto do
+arquivo *_grpc para um import de pacote (distdb.generated).
+
+Uso:  python scripts/generate_protos.py
 """
 
 import os
@@ -20,6 +23,7 @@ OUT_DIR = os.path.join(ROOT, "distdb", "generated")
 
 def main():
     os.makedirs(OUT_DIR, exist_ok=True)
+    # Invoca o compilador protoc (vem com o pacote grpcio-tools).
     cmd = [
         sys.executable, "-m", "grpc_tools.protoc",
         f"-I{PROTO_DIR}",
@@ -30,7 +34,7 @@ def main():
     print("running:", " ".join(cmd))
     subprocess.check_call(cmd)
 
-    # Fix the generated grpc file's import to be package-relative.
+    # Troca "import database_pb2" por um import relativo ao pacote.
     grpc_file = os.path.join(OUT_DIR, "database_pb2_grpc.py")
     with open(grpc_file, encoding="utf-8") as fh:
         src = fh.read()
@@ -40,7 +44,7 @@ def main():
     with open(grpc_file, "w", encoding="utf-8") as fh:
         fh.write(src)
 
-    # Ensure the package marker exists.
+    # Garante o marcador de pacote.
     init = os.path.join(OUT_DIR, "__init__.py")
     if not os.path.exists(init):
         open(init, "w").close()

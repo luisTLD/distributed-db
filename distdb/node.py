@@ -1,25 +1,20 @@
-"""Distributed database node (gRPC server + background coordination).
+"""Nó do banco de dados distribuído (servidor gRPC + threads de coordenação).
 
-This module is the *transport layer*: it wires the pure-logic components
-(:mod:`distdb.store`, :mod:`distdb.coordinator`, :mod:`distdb.election`,
-:mod:`distdb.failure_detector`, :mod:`distdb.lamport`) onto gRPC.
+Este é o programa que roda em cada máquina do cluster — a camada de
+"transporte" que liga os módulos de lógica pura (store, coordinator,
+election, failure_detector, lamport) à rede via gRPC. Sem ele, os
+algoritmos existiriam mas nenhum nó conversaria com outro.
 
-Every node runs the same code. Roles are dynamic:
+Todo nó executa este mesmo código; o papel é decidido em tempo de execução:
+  * o nó VIVO de maior id é o LÍDER (coordena todas as escritas via 2PC);
+  * os demais são RÉPLICAS (guardam dados, votam no 2PC e vigiam o líder).
 
-* the node with the highest id that is alive is the **leader** (it coordinates
-  all writes through Two-Phase Commit);
-* the others are **replicas / participants** (they store data, vote in 2PC, and
-  watch the leader).
+Threads de fundo garantem a tolerância a falhas:
+  * _heartbeat_loop -- pinga todos os peers e alimenta o detector de falhas;
+  * _monitor_loop   -- dispara eleição se o líder morreu, sincroniza estado
+                       ao reingressar e resolve transações "em dúvida".
 
-Background threads provide fault tolerance:
-
-* ``_heartbeat_loop``  -- pings every peer; updates the failure detector; if the
-  leader is unreachable, starts a Bully election.
-* ``_monitor_loop``    -- ages out silent peers and, on a replica, syncs state
-  from the leader once after (re)joining.
-
-Run a node with::
-
+Como executar um nó:
     python -m distdb.node --id 1
     python -m distdb.node --id 2
     python -m distdb.node --id 3
@@ -45,22 +40,23 @@ from distdb.coordinator import TwoPhaseCommit, COMMITTED, termination_decision
 from distdb.election import run_election
 from distdb.failure_detector import FailureDetector
 
-HEARTBEAT_INTERVAL = 1.0     # seconds between heartbeats
-FAILURE_TIMEOUT = 3.0        # mark a peer dead after this much silence
-RPC_TIMEOUT = 1.0            # fast-fail timeout for coordination RPCs
-TX_RPC_TIMEOUT = 2.5         # timeout for 2PC participant RPCs
-MAX_WRITE_RETRIES = 3        # retries after excluding a freshly-failed replica
-PENDING_TX_TIMEOUT = 8.0     # in-doubt tx older than this triggers termination
+HEARTBEAT_INTERVAL = 1.0     # segundos entre heartbeats
+FAILURE_TIMEOUT = 3.0        # silêncio acima disso => peer considerado morto
+RPC_TIMEOUT = 1.0            # timeout curto das RPCs de coordenação
+TX_RPC_TIMEOUT = 2.5         # timeout das RPCs do 2PC
+MAX_WRITE_RETRIES = 3        # tentativas de escrita excluindo réplicas mortas
+PENDING_TX_TIMEOUT = 8.0     # tx preparada sem decisão há mais que isso => terminação
 
+# Conversão entre as operações internas (strings) e o enum do protobuf.
 _OP_TO_PB = {PUT: pb2.OP_PUT, UPDATE: pb2.OP_UPDATE, DELETE: pb2.OP_DELETE}
 _PB_TO_OP = {v: k for k, v in _OP_TO_PB.items()}
 
 
 # ---------------------------------------------------------------------------
-#  2PC participant proxies (what the coordinator drives)
+#  Proxies de participante do 2PC (o que o coordenador "enxerga")
 # ---------------------------------------------------------------------------
 class LocalParticipant:
-    """The leader's own store, exposed as a 2PC participant."""
+    """O próprio store do líder, exposto como participante do 2PC."""
 
     def __init__(self, node_id: int, store: KeyValueStore):
         self.node_id = node_id
@@ -77,13 +73,14 @@ class LocalParticipant:
 
 
 class RemoteParticipant:
-    """A replica reached over gRPC, exposed as a 2PC participant."""
+    """Uma réplica remota (via gRPC), exposta como participante do 2PC."""
 
     def __init__(self, node_id: int, stub):
         self.node_id = node_id
         self._stub = stub
 
     def prepare(self, tx_id, op, key, value, timestamp):
+        # Fase 1 do 2PC: pede o voto da réplica.
         resp = self._stub.Prepare(
             pb2.PrepareRequest(tx_id=tx_id, op=_OP_TO_PB[op], key=key,
                                value=value, timestamp=timestamp),
@@ -102,7 +99,7 @@ class RemoteParticipant:
 
 
 # ---------------------------------------------------------------------------
-#  Node
+#  Nó
 # ---------------------------------------------------------------------------
 class Node(pb2_grpc.DatabaseServiceServicer):
     def __init__(self, node_id: int, nodes: List[config.NodeInfo], data_dir: str):
@@ -111,13 +108,13 @@ class Node(pb2_grpc.DatabaseServiceServicer):
         self.all_ids = sorted(self.cluster.keys())
         self.peer_ids = [i for i in self.all_ids if i != node_id]
         self.me = self.cluster[node_id]
-        # Majority quorum: writes only commit when at least this many
-        # participants (leader included) are alive (split-brain protection).
+        # Quórum majoritário: escritas só commitam com pelo menos esta
+        # quantidade de participantes vivos (proteção contra split-brain).
         self.majority = len(self.all_ids) // 2 + 1
 
         self.clock = LamportClock()
         self.store = KeyValueStore(data_dir=data_dir, node_name=f"node{node_id}")
-        self.store.recover()
+        self.store.recover()                      # recupera estado do disco (WAL)
         self.fd = FailureDetector(self.peer_ids, timeout=FAILURE_TIMEOUT)
         self.tpc = TwoPhaseCommit(self.clock)
 
@@ -125,18 +122,17 @@ class Node(pb2_grpc.DatabaseServiceServicer):
         self._leader_lock = threading.Lock()
         self._election_lock = threading.Lock()
         self._in_election = False
-        self._synced_leader: Optional[int] = None
+        self._synced_leader: Optional[int] = None  # de qual líder já sincronizei
 
-        self._stub_cache: Dict[int, object] = {}
+        self._stub_cache: Dict[int, object] = {}   # conexões gRPC reutilizadas
         self._running = True
 
-        # Leader-side concurrency control (first level of mutual exclusion):
-        # writes to the same key are serialized here, so concurrent client
-        # requests queue up instead of aborting each other in the 2PC prepare.
-        # Striped locks keep memory bounded regardless of how many keys exist.
+        # Exclusão mútua NÍVEL 1 (no líder): escritas concorrentes na MESMA
+        # chave são enfileiradas aqui, em vez de se abortarem no 2PC.
+        # "Striped locks": 64 locks fixos compartilhados por hash da chave.
         self._write_locks = [threading.Lock() for _ in range(64)]
 
-    # ------------------------------------------------------------- helpers
+    # ------------------------------------------------------------- auxiliares
     def is_leader(self) -> bool:
         with self._leader_lock:
             return self.leader_id == self.node_id
@@ -154,6 +150,7 @@ class Node(pb2_grpc.DatabaseServiceServicer):
         return self.cluster[lid].address if lid in self.cluster else ""
 
     def _stub(self, peer_id: int):
+        # Cria (e guarda em cache) o canal gRPC para um peer.
         stub = self._stub_cache.get(peer_id)
         if stub is None:
             channel = grpc.insecure_channel(self.cluster[peer_id].address)
@@ -165,7 +162,7 @@ class Node(pb2_grpc.DatabaseServiceServicer):
         role = "LEADER" if self.is_leader() else "REPLICA"
         print(f"[node {self.node_id}][{role}][clock {self.clock.value}] {msg}", flush=True)
 
-    # ============================================================ Client API
+    # ===================================================== API do cliente
     def Put(self, request, context):
         return self._client_write(PUT, request.key, request.value, request.timestamp)
 
@@ -176,9 +173,10 @@ class Node(pb2_grpc.DatabaseServiceServicer):
         return self._client_write(DELETE, request.key, "", request.timestamp)
 
     def _client_write(self, op, key, value, client_ts):
+        # Toda escrita do cliente passa por aqui.
         self.clock.update(client_ts)
         if not self.is_leader():
-            # Redirect the client to the current leader.
+            # Não sou o líder: devolvo o endereço dele para o cliente refazer.
             return pb2.WriteResponse(status=pb2.NOT_LEADER,
                                      message="not the leader",
                                      timestamp=self.clock.value,
@@ -188,29 +186,31 @@ class Node(pb2_grpc.DatabaseServiceServicer):
             return pb2.WriteResponse(status=pb2.OK,
                                      message=f"{op} committed (cohort={res.cohort_size})",
                                      timestamp=res.timestamp)
+        # Aborto: distingue erro semântico (chave inexistente) de falha.
         status = pb2.KEY_ABSENT if "does not exist" in res.reason else pb2.ABORTED
         return pb2.WriteResponse(status=status,
                                  message=f"{op} aborted: {res.reason}",
                                  timestamp=res.timestamp)
 
     def _write_lock_for(self, key: str) -> threading.Lock:
+        # Hash da chave -> um dos 64 locks (mesma chave => mesmo lock).
         return self._write_locks[hash(key) % len(self._write_locks)]
 
     def _coordinate_write(self, op, key, value):
-        """Drive 2PC across the live cohort, retrying past freshly-dead replicas.
+        """Executa o 2PC sobre o cohort vivo, com retry excluindo nós mortos.
 
-        Mutual exclusion happens at two levels:
-        1. here, the leader serializes concurrent writes to the same key
-           (striped locks), so simultaneous client requests queue up instead of
-           aborting each other;
-        2. during PREPARE, every participant takes a per-key lock in its own
-           store -- the distributed guarantee that still protects the data even
-           across leader changes or duplicated coordinators.
+        A exclusão mútua acontece em dois níveis:
+        1. aqui: o líder serializa escritas concorrentes na mesma chave
+           (locks por faixa), então requisições simultâneas entram na fila
+           em vez de se abortarem;
+        2. no PREPARE: cada participante trava a chave no próprio store --
+           a garantia distribuída, que protege mesmo numa troca de líder.
         """
         with self._write_lock_for(key):
             excluded: set = set()
             last_res = None
             for _ in range(MAX_WRITE_RETRIES):
+                # Monta o cohort: eu (líder) + réplicas vivas não excluídas.
                 now = time.monotonic()
                 live_ids = [pid for pid in self.peer_ids
                             if self.fd.is_alive(pid, now) and pid not in excluded]
@@ -220,18 +220,20 @@ class Node(pb2_grpc.DatabaseServiceServicer):
 
                 res = self._tpc_with_logging(participants, op, key, value)
                 last_res = res
+                # Quem falhou sai do próximo retry e é marcado como morto.
                 for pid in res.failed_nodes:
                     self.fd.record_dead(pid)
                     excluded.add(pid)
                 if res.status == COMMITTED:
                     return res
-                # Retry only if the abort was caused by a replica failure (not a
-                # semantic NO like "key does not exist").
+                # Só repete se o aborto foi por falha de réplica
+                # (voto NÃO semântico, ex. "chave não existe", não se repete).
                 if not res.failed_nodes:
                     return res
             return last_res
 
     def _tpc_with_logging(self, participants, op, key, value):
+        # Roda o 2PC exigindo quórum majoritário e registra o resultado no log.
         res = self.tpc.execute(participants, op, key, value,
                                min_participants=self.majority)
         verb = "COMMIT" if res.status == COMMITTED else "ABORT"
@@ -239,7 +241,7 @@ class Node(pb2_grpc.DatabaseServiceServicer):
                   f"votes={res.yes_votes}/{res.cohort_size} failed={res.failed_nodes}")
         return res
 
-    # ---- reads (any node can serve committed data) ----
+    # ---- leituras (qualquer nó responde com seus dados commitados) ----
     def Get(self, request, context):
         ts = self.clock.update(request.timestamp)
         found, value = self.store.get(request.key)
@@ -262,8 +264,9 @@ class Node(pb2_grpc.DatabaseServiceServicer):
         items = [pb2.KeyValue(key=k, value=v) for k, v in self.store.items()]
         return pb2.GetAllResponse(items=items, timestamp=ts)
 
-    # ========================================================= 2PC participant
+    # ================================================ participante do 2PC
     def Prepare(self, request, context):
+        # Fase 1: tento travar a chave, validar e tornar a intenção durável.
         ts = self.clock.update(request.timestamp)
         op = _PB_TO_OP[request.op]
         vote, reason = self.store.prepare(request.tx_id, op, request.key,
@@ -274,27 +277,30 @@ class Node(pb2_grpc.DatabaseServiceServicer):
                                 reason=reason, timestamp=self.clock.value)
 
     def Commit(self, request, context):
+        # Fase 2 (decisão = commit): aplica a operação preparada.
         ts = self.clock.update(request.timestamp)
         ok = self.store.commit(request.tx_id, ts)
         self._log(f"COMMIT tx={request.tx_id} applied={ok}")
         return pb2.AckResponse(ack=ok, timestamp=self.clock.value)
 
     def Abort(self, request, context):
+        # Fase 2 (decisão = abort): descarta a operação e libera o lock.
         ts = self.clock.update(request.timestamp)
         self.store.abort(request.tx_id, ts)
         self._log(f"ABORT tx={request.tx_id}")
         return pb2.AckResponse(ack=True, timestamp=self.clock.value)
 
     def QueryDecision(self, request, context):
-        # Termination protocol: a peer stuck with an in-doubt transaction asks
-        # what we know about it (we answer from our durable decision log).
+        # Protocolo de terminação: um peer preso com transação "em dúvida"
+        # pergunta o que sei sobre ela (respondo do meu log durável).
         self.clock.update(request.timestamp)
         decision = self.store.decision_of(request.tx_id)
         return pb2.DecisionInfo(tx_id=request.tx_id, decision=decision,
                                 timestamp=self.clock.value)
 
-    # ========================================================== Coordination
+    # ====================================================== coordenação
     def Heartbeat(self, request, context):
+        # "Estou vivo" + quem eu acho que é o líder.
         ts = self.clock.update(request.timestamp)
         self.fd.record_alive(request.node_id, time.monotonic())
         with self._leader_lock:
@@ -303,14 +309,15 @@ class Node(pb2_grpc.DatabaseServiceServicer):
                                      leader_id=my_leader, timestamp=ts)
 
     def Election(self, request, context):
-        # A lower-id node started an election. Answer (I'm alive) and, per Bully,
-        # start my own election because I outrank the sender.
+        # Um nó de id MENOR começou eleição. Pelo Bully: respondo "estou
+        # vivo" (ele desiste) e disparo minha própria eleição.
         ts = self.clock.update(request.timestamp)
         self._log(f"received ELECTION from node {request.node_id}; taking over")
         threading.Thread(target=self.start_election, daemon=True).start()
         return pb2.ElectionResponse(alive=True, node_id=self.node_id, timestamp=ts)
 
     def Announce(self, request, context):
+        # Anúncio do vencedor da eleição: passo a reconhecê-lo como líder.
         ts = self.clock.update(request.timestamp)
         self._set_leader(request.leader_id)
         return pb2.AckResponse(ack=True, timestamp=ts)
@@ -322,29 +329,34 @@ class Node(pb2_grpc.DatabaseServiceServicer):
         return pb2.LeaderInfo(leader_id=lid, leader_address=self.leader_address(),
                               timestamp=self.clock.value)
 
-    # ============================================================== Recovery
+    # ====================================================== recuperação
     def SyncState(self, request, context):
+        # Entrego meu estado completo (transferência de estado) + o carimbo
+        # do meu último commit, para o pedinte saber quão atual estou.
         ts = self.clock.update(request.timestamp)
         items = [pb2.KeyValue(key=k, value=v) for k, v in self.store.items()]
         self._log(f"SyncState -> node {request.node_id} ({len(items)} keys)")
         return pb2.SyncResponse(items=items, timestamp=ts,
                                 last_commit_ts=self.store.last_commit_ts)
 
-    # ============================================================ Background
+    # ================================================= threads de fundo
     def start(self):
         threading.Thread(target=self._heartbeat_loop, daemon=True).start()
         threading.Thread(target=self._monitor_loop, daemon=True).start()
-        # Kick off an initial election so the cluster converges on a leader.
+        # Eleição inicial, para o cluster convergir para um líder ao subir.
         threading.Thread(target=self._bootstrap, daemon=True).start()
 
     def _bootstrap(self):
-        time.sleep(HEARTBEAT_INTERVAL * 1.5)  # let heartbeats discover peers
+        # Espera os primeiros heartbeats; se ninguém informou um líder,
+        # disparo uma eleição.
+        time.sleep(HEARTBEAT_INTERVAL * 1.5)
         with self._leader_lock:
             known = self.leader_id
         if known is None:
             self.start_election()
 
     def _heartbeat_loop(self):
+        # A cada 1s: pinga todos os peers e atualiza o detector de falhas.
         while self._running:
             for pid in self.peer_ids:
                 try:
@@ -357,7 +369,7 @@ class Node(pb2_grpc.DatabaseServiceServicer):
                         timeout=RPC_TIMEOUT)
                     self.clock.update(resp.timestamp)
                     self.fd.record_alive(pid, time.monotonic())
-                    # Learn the leader from a peer if we don't have one.
+                    # Se ainda não sei quem é o líder, aprendo com o peer.
                     if resp.leader_id > 0:
                         with self._leader_lock:
                             unknown = self.leader_id is None
@@ -368,33 +380,35 @@ class Node(pb2_grpc.DatabaseServiceServicer):
             time.sleep(HEARTBEAT_INTERVAL)
 
     def _monitor_loop(self):
+        # A cada 1s: reage a líder morto, sincroniza estado e resolve
+        # transações em dúvida.
         while self._running:
             now = time.monotonic()
             self.fd.evaluate(now)
             with self._leader_lock:
                 lid = self.leader_id
-            # If the leader is gone, elect a new one.
             if lid is not None and lid != self.node_id and not self.fd.is_alive(lid, now):
+                # Líder sumiu -> eleição.
                 self._log(f"leader {lid} appears down -> starting election")
                 self._set_leader_none()
                 self.start_election()
             else:
-                # Replica catch-up: sync once from a (new) leader.
+                # Réplica que (re)entrou: sincroniza uma vez com o líder atual.
                 if lid is not None and lid != self.node_id and self._synced_leader != lid:
                     self._sync_from_leader(lid)
-            # 2PC termination protocol: resolve in-doubt transactions whose
-            # coordinator never sent a decision (it crashed mid-protocol).
+            # Terminação do 2PC: destrava transações cujo coordenador morreu.
             self._resolve_stale_transactions()
             time.sleep(HEARTBEAT_INTERVAL)
 
     def _resolve_stale_transactions(self):
-        """Unblock transactions stuck between PREPARE and the decision.
+        """Destrava transações presas entre o PREPARE e a decisão.
 
-        Classic 2PC blocks forever if the coordinator dies after PREPARE: the
-        participants hold the key locks and cannot decide alone. We resolve it
-        cooperatively: ask every reachable peer what it knows about the
-        transaction (``QueryDecision``). If anyone saw COMMIT we commit too;
-        otherwise we abort (presumed abort) and release the locks.
+        O 2PC clássico bloqueia para sempre se o coordenador morre depois do
+        PREPARE: o participante fica com a chave travada sem poder decidir
+        sozinho. Resolução cooperativa: pergunto a cada peer alcançável o que
+        ele sabe da transação (QueryDecision). Se ALGUÉM viu COMMIT, commito
+        também; se ninguém viu nada, aborto por presunção (presumed abort) e
+        libero o lock.
         """
         for op in self.store.stale_pending(PENDING_TX_TIMEOUT):
             decisions = []
@@ -423,8 +437,9 @@ class Node(pb2_grpc.DatabaseServiceServicer):
         with self._leader_lock:
             self.leader_id = None
 
-    # ------------------------------------------------------------ election
+    # ------------------------------------------------------------- eleição
     def start_election(self):
+        # Evita duas eleições simultâneas no mesmo nó.
         with self._election_lock:
             if self._in_election:
                 return
@@ -434,10 +449,9 @@ class Node(pb2_grpc.DatabaseServiceServicer):
             became_leader, answered = run_election(
                 self.node_id, self.all_ids, send_election=self._send_election)
             if became_leader:
-                # Replica control: before taking over, make sure we are not
-                # imposing stale data on the cluster. A node that rejoined
-                # after being down may win the election (highest id) while a
-                # peer holds newer committed state -- adopt that state first.
+                # Salvaguarda: se fiquei um tempo fora, algum peer pode ter
+                # estado MAIS NOVO que o meu. Adoto o mais recente ANTES de
+                # me anunciar, para nunca regredir o banco.
                 self._adopt_freshest_state()
                 self._set_leader(self.node_id)
                 self._announce_leadership()
@@ -449,6 +463,7 @@ class Node(pb2_grpc.DatabaseServiceServicer):
                 self._in_election = False
 
     def _send_election(self, peer_id: int) -> bool:
+        # Envia ELECTION a um peer de id maior; True se ele respondeu vivo.
         try:
             ts = self.clock.tick()
             resp = self._stub(peer_id).Election(
@@ -461,6 +476,7 @@ class Node(pb2_grpc.DatabaseServiceServicer):
             return False
 
     def _announce_leadership(self):
+        # Avisa todos: "eu sou o novo líder" (mensagem COORDINATOR do Bully).
         for pid in self.peer_ids:
             try:
                 ts = self.clock.tick()
@@ -470,8 +486,9 @@ class Node(pb2_grpc.DatabaseServiceServicer):
             except grpc.RpcError:
                 self.fd.record_dead(pid)
 
-    # ------------------------------------------------------------ state sync
+    # --------------------------------------------- sincronização de estado
     def _sync_from_leader(self, leader_id: int):
+        # Réplica reingressando: substitui o próprio estado pelo do líder.
         try:
             ts = self.clock.tick()
             resp = self._stub(leader_id).SyncState(
@@ -486,12 +503,12 @@ class Node(pb2_grpc.DatabaseServiceServicer):
             self._log(f"state sync from leader {leader_id} failed: {exc.code()}")
 
     def _adopt_freshest_state(self):
-        """Pull state from any live peer with a newer committed transaction.
+        """Adota o estado mais recente entre os peers vivos (se houver).
 
-        Called by the election winner *before* announcing leadership. Because
-        writes are replicated synchronously to every live node, any node that
-        stayed up has the complete committed state; comparing ``last_commit_ts``
-        (Lamport) tells us whether a peer saw commits we missed while down.
+        Chamado pelo VENCEDOR da eleição, antes do anúncio. Como a replicação
+        é síncrona em todos os nós vivos, quem ficou no ar tem o estado
+        completo; comparar o last_commit_ts (Lamport) revela se algum peer
+        viu commits que eu perdi enquanto estive fora.
         """
         now = time.monotonic()
         best_ts = self.store.last_commit_ts
@@ -505,6 +522,7 @@ class Node(pb2_grpc.DatabaseServiceServicer):
                     pb2.SyncRequest(node_id=self.node_id, timestamp=ts),
                     timeout=TX_RPC_TIMEOUT)
                 self.clock.update(resp.timestamp)
+                # Guarda o estado do peer mais atualizado que eu.
                 if resp.last_commit_ts > best_ts:
                     best_ts = resp.last_commit_ts
                     best_items = {kv.key: kv.value for kv in resp.items}
@@ -518,12 +536,13 @@ class Node(pb2_grpc.DatabaseServiceServicer):
 
 
 def serve():
+    # Ponto de entrada: lê os argumentos, sobe o servidor gRPC e as threads.
     parser = argparse.ArgumentParser(description="Distributed DB node")
-    parser.add_argument("--id", type=int, required=True, help="this node's id")
+    parser.add_argument("--id", type=int, required=True, help="id deste nó")
     parser.add_argument("--peers", type=str, default=None,
-                        help='cluster spec, e.g. "1=127.0.0.1:50051,2=127.0.0.1:50052"')
+                        help='topologia, ex.: "1=127.0.0.1:50051,2=127.0.0.1:50052"')
     parser.add_argument("--data-dir", type=str, default="data",
-                        help="directory for WAL/snapshot files")
+                        help="diretório dos arquivos de WAL/snapshot")
     args = parser.parse_args()
 
     nodes = config.parse_peers(args.peers) if args.peers else config.DEFAULT_CLUSTER

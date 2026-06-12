@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
-# Stop the local cluster started by run_cluster.sh
+# Encerra o cluster local iniciado pelo run_cluster.sh: como os nós rodam em
+# segundo plano, este script mata os PIDs anotados em logs/cluster.pids.
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT"
 if [ -f logs/cluster.pids ]; then

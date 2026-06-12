@@ -1,21 +1,19 @@
 #!/usr/bin/env python3
-"""Performance analysis: distributed cluster vs. single machine.
+"""Análise de desempenho: cluster distribuído vs. máquina única.
 
-Measures write/read throughput and latency in two settings:
+Compara o sistema distribuído com a execução em uma única máquina (análise
+pedida no enunciado) e gera os números usados no relatório. Mede vazão e
+latência de escritas/leituras em dois cenários:
+  1. DISTRIBUÍDO -- as escritas passam pelo líder e são commitadas com 2PC
+     em todas as réplicas vivas (custo de rede + coordenação). Fala com um
+     cluster JÁ EM EXECUÇÃO, usando o cliente normal.
+  2. MÁQUINA ÚNICA (baseline) -- as mesmas operações aplicadas direto em um
+     KeyValueStore local, sem replicação e sem rede. É a referência "rodando
+     em uma só máquina" pedida pelo enunciado.
 
-1. **Distributed** -- writes go through the leader and are committed with
-   Two-Phase Commit across all live replicas (network + 2PC overhead). This
-   talks to a *running* cluster via the normal client.
-
-2. **Single machine (baseline)** -- the same number of operations applied
-   directly to one in-process :class:`KeyValueStore` with no replication and no
-   network. This is the "run on a single machine" reference the assignment asks
-   to compare against.
-
-Usage (with a cluster already running):
+Uso (com o cluster no ar):
     python scripts/benchmark.py --ops 500
-
-Run only the local baseline (no cluster needed):
+Só o baseline (não precisa de cluster):
     python scripts/benchmark.py --ops 500 --baseline-only
 """
 
@@ -31,6 +29,7 @@ from distdb.store import KeyValueStore, PUT, UPDATE
 
 
 def _fmt(label, n, seconds):
+    # Imprime uma linha de resultado e devolve a vazão (ops/s).
     ops_s = n / seconds if seconds > 0 else float("inf")
     print(f"  {label:<28} {n} ops in {seconds:7.3f}s "
           f"-> {ops_s:9.1f} ops/s, {seconds / n * 1000:7.3f} ms/op")
@@ -38,8 +37,9 @@ def _fmt(label, n, seconds):
 
 
 def baseline(n):
+    # Cenário 2: store local em memória, sem rede e sem 2PC.
     print(f"\n[single machine] {n} writes + {n} reads on one local store (no network, no 2PC)")
-    store = KeyValueStore()  # purely in-memory
+    store = KeyValueStore()  # puramente em memória
     t0 = time.perf_counter()
     for i in range(n):
         tx = f"t{i}"
@@ -56,7 +56,8 @@ def baseline(n):
 
 
 def distributed(n, nodes):
-    import grpc  # noqa: F401  (only needed in this path)
+    # Cenário 1: cluster real via gRPC (import local: só este caminho usa rede).
+    import grpc  # noqa: F401
     from distdb.client import ClusterClient
     print(f"\n[distributed] {n} writes + {n} reads via leader (2PC across replicas)")
     client = ClusterClient(nodes)
@@ -97,6 +98,7 @@ def main():
         print("Start the cluster first (scripts/run_cluster.*) or use --baseline-only.")
         return
 
+    # Resumo: quantas vezes o distribuído é mais lento que o local.
     print("\n" + "-" * 64)
     print("Replication / network cost (single machine is the fast baseline):")
     if d_w:
