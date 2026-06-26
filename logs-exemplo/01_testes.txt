@@ -1,0 +1,7 @@
+2pc: OK
+election+fd: OK
+integration: OK
+lamport: OK
+store: OK
+----------------------------------------
+ALL TESTS PASSED

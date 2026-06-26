@@ -1,0 +1,18 @@
+================================================================
+Performance comparison  (ops = 200)
+================================================================
+
+[single machine] 200 writes + 200 reads on one local store (no network, no 2PC)
+  local writes                 200 ops in   0.000s ->  471698.1 ops/s,   0.002 ms/op
+  local reads                  200 ops in   0.000s -> 3636359.0 ops/s,   0.000 ms/op
+
+[distributed] 200 writes + 200 reads via leader (2PC across replicas)
+  leader = node 3 (127.0.0.1:50053)
+  distributed writes           200 ops in   1.154s ->     173.3 ops/s,   5.769 ms/op
+  distributed reads            200 ops in   0.074s ->    2688.7 ops/s,   0.372 ms/op
+
+----------------------------------------------------------------
+Replication / network cost (single machine is the fast baseline):
+  writes: distributed is 2721.4x slower than single machine
+  reads:  distributed is 1352.5x slower than single machine
+Writes pay the 2PC + replication cost; reads are served locally by any node.

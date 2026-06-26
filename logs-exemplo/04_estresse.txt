@@ -1,0 +1,25 @@
+==================================================================
+STRESS TEST: 8 concurrent clients x 100 ops = 800 ops
+  hot-key write ratio: 30%   read ratio: 30%
+  TIP: kill a replica (or the leader!) while this runs to watch
+       the failure handling under load.
+==================================================================
+  ... 787/800 ops (787 ops in the last second)
+
+==================================================================
+RESULTS  (800 ops in 1.03s -> 775.5 ops/s aggregate)
+------------------------------------------------------------------
+  writes: 560  (committed=560  aborted=0  failed=0)
+    latency  p50=   12.2 ms   p95=   21.8 ms   p99=   29.5 ms
+  reads:  240  (ok=240  failed=0)
+    latency  p50=    2.2 ms   p95=    3.3 ms   p99=    4.0 ms
+
+[consistency check] reading the full state of every node:
+  node 1 (127.0.0.1:50051): 594 keys
+  node 2 (127.0.0.1:50052): 594 keys
+  node 3 (127.0.0.1:50053): 594 keys
+  node 2 == node 1  OK
+  node 3 == node 1  OK
+  RESULT: all reachable nodes hold IDENTICAL data.
+
+STRESS TEST PASSED

@@ -1,0 +1,13 @@
+== scripted demo ==
+leader = node 3 (127.0.0.1:50053)
+put user Luis       -> PUT committed (cohort=3)
+put lang Python      -> PUT committed (cohort=3)
+get user             -> Luis
+update user Carlos   -> UPDATE committed (cohort=3)
+get user             -> Carlos
+exists lang          -> True
+update missing X     -> UPDATE aborted: node 3: key 'missing' does not exist
+list                 -> ['user', 'lang']
+size                 -> 2
+delete lang          -> DELETE committed (cohort=3)
+all                  -> [('user', 'Carlos')]

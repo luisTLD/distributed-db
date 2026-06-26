@@ -1,4 +1,4 @@
-# Dependências do projeto (testadas com Python 3.10+ no Windows/Linux).
+# Dependências do projeto (testadas com Python 3.11.9 no Windows/Linux).
 # Instalar com: pip install -r requirements.txt
 grpcio==1.80.0
 grpcio-tools==1.80.0
