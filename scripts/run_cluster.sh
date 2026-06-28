@@ -1,7 +1,5 @@
 #!/usr/bin/env bash
-# Sobe um cluster local de 3 nós (Linux/macOS), cada nó em segundo plano —
-# evita abrir 3 terminais na mão durante o desenvolvimento.
-# Logs em logs/nodeN.log. Para encerrar: scripts/stop_cluster.sh
+# Sobe um cluster local de 3 nós (Linux/macOS). Logs em logs/nodeN.log.
 set -e
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT"

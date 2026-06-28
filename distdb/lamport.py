@@ -1,17 +1,4 @@
-"""Relógio lógico de Lamport — implementação manual.
-
-Em um sistema distribuído não há relógio físico confiável comum a todas as
-máquinas. O relógio de Lamport dá uma ORDEM aos eventos do cluster sem
-depender de hora de parede: se o evento A causou o evento B, então
-C(A) < C(B) (relação happened-before).
-
-Cada processo mantém um contador inteiro com as duas regras clássicas:
-  1. antes de um evento local / envio de mensagem: clock += 1  (tick)
-  2. ao receber uma mensagem com carimbo t: clock = max(clock, t) + 1 (update)
-
-No projeto, todo RPC carrega esse carimbo; ele data as transações no WAL e o
-last_commit_ts (usado na eleição) é derivado dele.
-"""
+"""Relógio lógico de Lamport."""
 
 from __future__ import annotations
 

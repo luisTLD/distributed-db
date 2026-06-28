@@ -1,10 +1,4 @@
-"""Testes da eleição Bully e do detector de falhas.
-
-Validam a regra "maior id vivo vence" em todos os casos (vence direto,
-desiste, vence porque os maiores morreram) e o comportamento do detector
-(timeout e suspeita imediata) — sem precisar de rede, pois o envio de
-mensagens é injetado como função.
-"""
+"""Testes da eleição Bully e do detector de falhas."""
 import os
 import sys
 

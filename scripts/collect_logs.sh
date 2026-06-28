@@ -1,19 +1,5 @@
 #!/usr/bin/env bash
-# =============================================================================
-#  collect_logs.sh: roda TUDO de uma vez e junta os logs em logs/coleta/
-#
-#  Faz, em sequência, a partir da raiz do projeto (com o venv ativo):
-#    1. testes automatizados (sem rede)        -> 01_tests.txt
-#    2. sobe o cluster de 3 nós                 -> logs/nodeN.log
-#    3. demo do cliente (2PC, abort, ...)       -> 02_client_demo.txt
-#    4. benchmark distribuído x máquina única   -> 03_benchmark.txt
-#    5. teste de estresse + consistência        -> 04_stress.txt
-#    6. copia os logs dos nós                    -> 05_node*.log
-#    7. encerra o cluster
-#
-#  Uso:  bash scripts/collect_logs.sh
-#        OPS=300 CLIENTS=16 CLIENT_OPS=200 bash scripts/collect_logs.sh
-# =============================================================================
+# Roda tudo (testes, cluster, demo, benchmark, estresse) e junta os logs em logs/coleta/.
 set -u
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT"

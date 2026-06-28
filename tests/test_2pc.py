@@ -1,10 +1,4 @@
-"""Testes do Two-Phase Commit, do quórum e do protocolo de terminação.
-
-Provam as garantias centrais das transações distribuídas — atomicidade
-(tudo-ou-nada), aborto em caso de voto NÃO ou falha, recusa sem quórum e a
-resolução de transações "em dúvida" quando o coordenador morre. Os
-participantes são stores locais, então tudo roda sem rede.
-"""
+"""Testes do 2PC: atomicidade, quórum e protocolo de terminação."""
 import os
 import sys
 

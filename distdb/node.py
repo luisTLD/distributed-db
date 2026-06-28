@@ -1,24 +1,4 @@
-"""Nó do banco de dados distribuído (servidor gRPC + threads de coordenação).
-
-Este é o programa que roda em cada máquina do cluster — a camada de
-"transporte" que liga os módulos de lógica pura (store, coordinator,
-election, failure_detector, lamport) à rede via gRPC. Sem ele, os
-algoritmos existiriam mas nenhum nó conversaria com outro.
-
-Todo nó executa este mesmo código; o papel é decidido em tempo de execução:
-  * o nó VIVO de maior id é o LÍDER (coordena todas as escritas via 2PC);
-  * os demais são RÉPLICAS (guardam dados, votam no 2PC e vigiam o líder).
-
-Threads de fundo garantem a tolerância a falhas:
-  * _heartbeat_loop -- pinga todos os peers e alimenta o detector de falhas;
-  * _monitor_loop   -- dispara eleição se o líder morreu, sincroniza estado
-                       ao reingressar e resolve transações "em dúvida".
-
-Como executar um nó:
-    python -m distdb.node --id 1
-    python -m distdb.node --id 2
-    python -m distdb.node --id 3
-"""
+"""Nó do banco distribuído: servidor gRPC e threads de coordenação."""
 
 from __future__ import annotations
 

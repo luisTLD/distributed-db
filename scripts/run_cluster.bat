@@ -1,9 +1,5 @@
 @echo off
-REM Sobe um cluster local de 3 nos no Windows, cada um na propria janela --
-REM evita abrir 3 terminais na mao durante o desenvolvimento.
-REM Execute a partir da raiz do projeto (pasta que contem "distdb"),
-REM com o ambiente virtual (venv) ja ativado.
-
+REM Sobe um cluster local de 3 nos no Windows, cada um na propria janela.
 cd /d "%~dp0.."
 if not exist data mkdir data
 

@@ -1,25 +1,4 @@
-"""Coordenador do Two-Phase Commit (2PC) — implementação manual.
-
-É o algoritmo que garante a ATOMICIDADE das escritas replicadas: ou todos
-os nós aplicam a operação, ou nenhum aplica. Sem ele, uma queda no meio de
-uma escrita deixaria réplicas com valores diferentes.
-
-Dirige a transação sobre um conjunto de "participantes" (o store local do
-líder + as réplicas vivas) e é agnóstico de transporte: participante é
-qualquer objeto com prepare/commit/abort — nos testes são objetos locais,
-em produção são proxies gRPC (ver node.py).
-
-Protocolo:
-  Fase 1 — VOTAÇÃO: envia PREPARE(tx, op, chave, valor) a cada participante,
-    que trava a chave, valida, grava a intenção no WAL e vota SIM ou NÃO.
-    Participante inalcançável conta como NÃO (e é reportado ao chamador).
-  Fase 2 — DECISÃO: todos SIM -> COMMIT em todos (escrita visível
-    atomicamente). Algum NÃO ou falha -> ABORT em todos (ninguém aplica,
-    locks liberados).
-
-Também contém a regra de decisão do protocolo de terminação
-(termination_decision), usada por participantes "em dúvida".
-"""
+"""Coordenador do Two-Phase Commit e regra de terminação."""
 
 from __future__ import annotations
 

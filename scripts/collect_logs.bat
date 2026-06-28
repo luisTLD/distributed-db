@@ -1,22 +1,5 @@
 @echo off
-REM =============================================================================
-REM  collect_logs.bat -- roda TUDO no Windows e junta os logs em logs\coleta\
-REM
-REM  Faz, em sequencia, a partir da raiz do projeto (com o venv ativo):
-REM    1. testes automatizados (sem rede)        -> logs\coleta\01_tests.txt
-REM    2. sobe o cluster de 3 nos (em background) -> logs\nodeN.log
-REM    3. demo do cliente (2PC, abort, ...)       -> logs\coleta\02_client_demo.txt
-REM    4. benchmark distribuido x maquina unica   -> logs\coleta\03_benchmark.txt
-REM    5. teste de estresse + consistencia        -> logs\coleta\04_stress.txt
-REM    6. copia os logs dos nos                    -> logs\coleta\05_nodeN.log
-REM    7. junta tudo em                            -> logs\coleta\TUDO.txt
-REM    8. encerra o cluster
-REM
-REM  USO (a partir da pasta do projeto, com o venv ativo):
-REM      scripts\collect_logs.bat
-REM
-REM  No fim, MANDE o arquivo:  logs\coleta\TUDO.txt
-REM =============================================================================
+REM Roda tudo (testes, cluster, demo, benchmark, estresse) e junta os logs em logs\coleta\.
 setlocal
 
 REM ---- vai para a raiz do projeto (pasta que contem este scripts\) ----

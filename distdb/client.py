@@ -1,25 +1,4 @@
-"""Cliente de linha de comando do banco distribuído.
-
-A porta de entrada do usuário: sem ele, só daria para falar com o cluster
-escrevendo código gRPC na mão. Ele esconde a complexidade do cluster —
-descobre o líder, segue redirecionamentos e sobrevive a nós fora do ar.
-
-É tolerante a falhas no caminho de leitura e de escrita:
-  * mantém conexão com todos os nós;
-  * ESCRITAS precisam ir ao líder — se contatar uma réplica, ela responde
-    NOT_LEADER com o endereço certo e o cliente refaz lá (redirecionamento);
-  * se um nó está fora do ar, tenta o próximo (failover);
-  * LEITURAS podem ser atendidas por qualquer nó.
-
-Mantém o próprio relógio de Lamport, ordenando causalmente suas operações
-com as dos servidores.
-
-Uso:
-    python -m distdb.client                 # modo interativo (prompt db>)
-    python -m distdb.client --demo          # demonstração roteirizada
-    python -m distdb.client put user Luis   # comando único
-    python -m distdb.client get user
-"""
+"""Cliente de linha de comando: redireciona ao líder e faz failover."""
 
 from __future__ import annotations
 

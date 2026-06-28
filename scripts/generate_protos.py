@@ -1,15 +1,5 @@
 #!/usr/bin/env python3
-"""Compila proto/database.proto para distdb/generated/.
-
-O gRPC não lê o .proto em tempo de execução — ele precisa do código Python
-gerado (stubs). Sem rodar este script, os nós nem iniciam (erro de import).
-Rode-o uma vez após clonar o projeto e SEMPRE que o database.proto mudar.
-
-Gera database_pb2.py e database_pb2_grpc.py e conserta o import absoluto do
-arquivo *_grpc para um import de pacote (distdb.generated).
-
-Uso:  python scripts/generate_protos.py
-"""
+"""Gera os stubs gRPC a partir de proto/database.proto."""
 
 import os
 import re

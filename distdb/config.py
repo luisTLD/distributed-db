@@ -1,16 +1,4 @@
-"""Topologia do cluster: ids e endereços dos nós.
-
-Todos os módulos precisam saber quem são os nós do cluster (heartbeat,
-eleição, 2PC e o cliente dependem disso); este arquivo centraliza essa
-informação e o parsing da opção --peers.
-
-Define NodeInfo (id + host + porta), o cluster padrão de 3 nós em localhost
-(para testes na mesma máquina) e o parse_peers() que lê a topologia da
-linha de comando — é assim que o sistema roda em várias máquinas da rede
-local (basta trocar 127.0.0.1 pelos IPs reais).
-
-Os ids precisam ser únicos: a eleição Bully usa "maior id vivo vence".
-"""
+"""Topologia do cluster: ids, endereços e parsing de --peers."""
 
 from __future__ import annotations
 

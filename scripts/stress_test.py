@@ -1,28 +1,5 @@
 #!/usr/bin/env python3
-"""Teste de estresse (alta concorrência) + verificação de consistência.
-
-Responde "como o sistema se comporta com MUITAS requisições simultâneas?" e
-serve de palco para demonstrar a tolerância a falhas sob carga: dá para
-derrubar um nó (ou o líder) no meio do teste e ver o sistema se recuperar.
-
-Dispara N threads-cliente ao mesmo tempo com carga mista:
-  * escritas em poucas chaves QUENTES disputadas por todos -> estressa a
-    exclusão mútua (serialização no líder + locks por chave no 2PC);
-  * escritas em chaves únicas por thread -> paralelismo sem conflito;
-  * leituras (atendidas por qualquer nó).
-
-Imprime a vazão por segundo durante a execução (a queda na re-eleição fica
-visível) e, ao final:
-  1. vazão total, latências p50/p95/p99 e contagem committed/aborted/failed;
-  2. CONSISTÊNCIA: lê o estado completo de CADA nó vivo e confere que todos
-     têm exatamente os mesmos dados.
-
-Uso (cluster já no ar):
-    python scripts/stress_test.py                          # 8 clientes x 100 ops
-    python scripts/stress_test.py --clients 16 --ops 200
-    python scripts/stress_test.py --hot-ratio 0.5          # mais disputa
-    python scripts/stress_test.py --peers "1=192.168.0.10:50051,..."
-"""
+"""Teste de estresse: clientes concorrentes e checagem de consistência."""
 
 import argparse
 import os

@@ -254,8 +254,9 @@ Cada nó mantém um registro de escrita antecipada (WAL): os registros
 \emph{antes} de qualquer alteração em memória~[3]. Ao reiniciar, o nó
 reconstrói o estado a partir do \emph{snapshot} mais recente e reaplica do
 WAL apenas as transações com \texttt{COMMIT} registrado; transações
-preparadas sem decisão são descartadas com segurança. Snapshots periódicos
-compactam o log.
+preparadas sem decisão são descartadas com segurança. Os \emph{snapshots}
+compactam o log e são gerados nas transferências de estado (ressincronização
+de réplica ou adoção do estado mais recente na eleição).
 
 \subsection{Reingresso de réplica}
 
@@ -319,9 +320,10 @@ $\rightarrow$ eleição $\rightarrow$ ressincronização.
 \textbf{Injeção manual de falhas.} Com o agrupamento no ar, derrubamos
 réplicas e o líder em momentos distintos e acompanhamos os registros. Na
 queda do líder (nó~3), o nó~2 detectou a ausência de \emph{heartbeat},
-venceu a eleição e assumiu em $\approx$4\,s (janela dominada pelo
-\emph{timeout} de detecção, de 3\,s); a réplica restante ressincronizou as
-594 chaves do novo líder em seguida. Também observamos a reexecução
+venceu a eleição e assumiu em poucos segundos (a detecção é limitada
+pelo \emph{timeout} de 3\,s, mas costuma ser mais rápida, pois o RPC ao
+líder falha de imediato); a réplica restante ressincronizou o estado
+completo do novo líder em seguida. Também observamos a reexecução
 transparente de escritas após queda de réplica, a ressincronização no
 reingresso e a recusa de escritas (\texttt{no quorum}) quando restou
 apenas um nó.
@@ -350,7 +352,7 @@ deixá-las se abortarem no 2PC, ao custo de latência sob disputa
 contra p50 de 2{,}2\,ms nas leituras). Ao final, o verificador leu o estado
 completo de cada nó e confirmou os três \textbf{idênticos}, com 594
 chaves. Repetimos o teste derrubando o líder sob carga: a vazão cai durante
-a janela de reeleição ($\approx$4\,s), os clientes reexecutam as escritas
+a janela de reeleição (poucos segundos), os clientes reexecutam as escritas
 pendentes no novo líder e nenhuma operação se perde.
 
 \begin{table}[ht]
@@ -412,8 +414,8 @@ escalar as escritas horizontalmente.
 
 {\small
 Luís Augusto Starling Toledo foi responsável pela arquitetura do sistema,
-pela implementação do nó (servidor gRPC) e pela integração dos módulos,
-incluindo a coordenação das escritas via 2PC.
+pela implementação do nó (servidor gRPC) e pela integração dos
+módulos.
 
 Edson Pimenta de Almeida implementou o armazém chave--valor com WAL,
 \emph{snapshots} e recuperação após falhas, além da organização do
@@ -427,8 +429,8 @@ geração dos \emph{stubs} e pelo cliente com redirecionamento e
 João Lucas de Melo Quintão desenvolveu a suíte de testes de unidade e
 integração e os roteiros de injeção de falhas.
 
-Juan Pablo Ramos de Oliveira foi responsável pela documentação do projeto
-(instruções de execução e relatório) e pelo roteiro de demonstração.
+Juan Pablo Ramos de Oliveira foi responsável pela coordenação das
+escritas via 2PC (Two-Phase Commit).
 
 Luiz Gabriel Milione Assis implementou o detector de falhas por
 \emph{heartbeat} e a eleição de líder, e preparou a execução do sistema em

@@ -1,11 +1,5 @@
 #!/usr/bin/env python3
-"""Executa todos os testes desta pasta (sem precisar de pytest).
-
-Um único comando para validar toda a lógica distribuída — não precisa de
-rede nem do cluster no ar:
-
-    python tests/run_all.py
-"""
+"""Roda todos os testes da pasta."""
 import glob
 import os
 import runpy

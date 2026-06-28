@@ -1,23 +1,4 @@
-"""Armazém chave-valor durável: WAL, locks por chave e log de decisões.
-
-É a "memória" de cada nó: concentra tudo que envolve guardar dados com
-segurança — o dicionário em memória, a durabilidade em disco (para
-sobreviver a quedas) e os locks por chave (exclusão mútua do 2PC). É
-independente de rede/gRPC de propósito: assim os testes de unidade
-exercitam toda esta lógica sem subir um cluster.
-
-Responsabilidades:
-  1. Dados em memória -- um dict com os pares chave/valor JÁ COMMITADOS.
-  2. Durabilidade (WAL) -- toda transação grava PREPARE e depois COMMIT ou
-     ABORT em um log apêndice no disco ANTES de mexer na memória. Se o
-     processo cair, recover() reconstrói o estado exato pelo snapshot + log.
-  3. Exclusão mútua -- enquanto uma transação está "preparada" numa chave, a
-     chave fica travada; outra transação na mesma chave recebe voto NÃO.
-  4. Log de decisões -- guarda o desfecho (COMMIT/ABORT) de cada transação,
-     para responder ao protocolo de terminação dos peers.
-
-O 2PC dirige o store pelo trio prepare() / commit() / abort().
-"""
+"""Armazém chave-valor com WAL, snapshot e locks por chave."""
 
 from __future__ import annotations
 

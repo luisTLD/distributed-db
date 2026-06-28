@@ -1,17 +1,4 @@
-"""Detector de falhas por heartbeat.
-
-Nenhum nó consegue "ver" diretamente que outro morreu — só dá para inferir
-pela ausência de respostas. Este componente transforma silêncio em decisão:
-registra o último instante em que cada peer foi visto (heartbeats chegam a
-cada ~1s) e marca como SUSPEITO quem ficou mudo além do timeout — ou
-imediatamente, quando um RPC para o nó falha. É a base da tolerância a
-falhas:
-  * o LÍDER monta o cohort do 2PC só com réplicas vivas;
-  * as RÉPLICAS percebem a morte do líder e disparam a eleição.
-
-O tempo é injetado por parâmetro (now), o que torna a lógica determinística
-e testável sem esperas reais.
-"""
+"""Detector de falhas por heartbeat."""
 
 from __future__ import annotations
 

@@ -1,9 +1,4 @@
-"""Testes do armazém chave-valor (distdb/store.py).
-
-Validam a base de tudo — visibilidade só após commit, locks por chave
-(exclusão mútua), durabilidade/recuperação pelo WAL, snapshot,
-last_commit_ts e o log de decisões usado pela terminação do 2PC.
-"""
+"""Testes do armazém: commit/abort, locks e recuperação por WAL."""
 import os
 import sys
 import tempfile

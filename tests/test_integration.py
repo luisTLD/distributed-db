@@ -1,11 +1,4 @@
-"""Teste de integração com cluster simulado (sem gRPC).
-
-Valida o fluxo COMPLETO de tolerância a falhas — escrita replicada, queda
-de réplica, queda do líder, eleição e recuperação por transferência de
-estado — usando os módulos reais de lógica, mas com a "rede" simulada em
-memória (nó morto = exceção, como um peer gRPC caído). Isso torna o cenário
-determinístico e executável em milissegundos.
-"""
+"""Teste de integração de tolerância a falhas."""
 
 import os
 import sys

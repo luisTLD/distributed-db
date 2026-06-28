@@ -1,8 +1,4 @@
-"""Testes do relógio lógico de Lamport (distdb/lamport.py).
-
-Garantem que as duas regras do algoritmo estão corretas — todo o
-ordenamento causal do sistema depende delas.
-"""
+"""Testes do relógio de Lamport."""
 import os
 import sys
 

@@ -1,21 +1,5 @@
 #!/usr/bin/env python3
-"""Análise de desempenho: cluster distribuído vs. máquina única.
-
-Compara o sistema distribuído com a execução em uma única máquina (análise
-pedida no enunciado) e gera os números usados no relatório. Mede vazão e
-latência de escritas/leituras em dois cenários:
-  1. DISTRIBUÍDO -- as escritas passam pelo líder e são commitadas com 2PC
-     em todas as réplicas vivas (custo de rede + coordenação). Fala com um
-     cluster JÁ EM EXECUÇÃO, usando o cliente normal.
-  2. MÁQUINA ÚNICA (baseline) -- as mesmas operações aplicadas direto em um
-     KeyValueStore local, sem replicação e sem rede. É a referência "rodando
-     em uma só máquina" pedida pelo enunciado.
-
-Uso (com o cluster no ar):
-    python scripts/benchmark.py --ops 500
-Só o baseline (não precisa de cluster):
-    python scripts/benchmark.py --ops 500 --baseline-only
-"""
+"""Benchmark: compara o cluster distribuído com um armazém local."""
 
 import argparse
 import os

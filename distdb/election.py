@@ -1,17 +1,4 @@
-"""Eleição de líder — algoritmo do valentão (Bully), implementação manual.
-
-O sistema precisa de exatamente UM líder para coordenar as escritas. Se o
-líder morre, os sobreviventes escolhem outro sozinhos, sem intervenção
-humana — é isso que este algoritmo resolve, pela regra "o nó VIVO de maior
-id é o líder". Quando um nó percebe que o líder sumiu:
-  1. envia ELECTION para todos os nós de id MAIOR que o seu;
-  2. se NINGUÉM responde -> ele venceu: anuncia-se líder (COORDINATOR);
-  3. se ALGUÉM maior responde ("estou vivo") -> ele desiste; o maior conduz
-     a própria eleição e fará o anúncio.
-
-Este módulo contém SÓ a lógica de decisão (testável sem rede). O envio real
-das mensagens e o anúncio ficam em node.py.
-"""
+"""Eleição de líder pelo algoritmo Bully (lógica de decisão)."""
 
 from __future__ import annotations
 
